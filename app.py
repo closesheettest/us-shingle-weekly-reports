@@ -196,3 +196,123 @@ with tabs[0]:
                             rep_val = str(row[rep_name_col])
                             # unique key per button
                             if st.button(f"🔍 View • {rep_val}", key=f"rep_view_{i}"):
+                                st.session_state["open_rep_modal"] = rep_val
+
+                        # Open modal if a rep was clicked
+                        if "open_rep_modal" in st.session_state:
+                            sel_rep = st.session_state["open_rep_modal"]
+                            with st.modal(f"Sales Rep Details — {sel_rep}"):
+                                c1, c2, c3 = st.columns(3)
+                                f_sit  = c1.checkbox("Only Sits (Sales logic)", key=f"rep_only_sits_modal_{sel_rep}")
+                                f_sale = c2.checkbox("Only Sales", key=f"rep_only_sales_modal_{sel_rep}")
+                                f_ns   = c3.checkbox("Only No-Shows", key=f"rep_only_noshow_modal_{sel_rep}")
+
+                                mask = (df_display[cols_map["sales_rep"]].astype(str) == sel_rep)
+                                if f_sit:
+                                    mask &= df_display["is_sit_sales"]
+                                if f_sale:
+                                    mask &= df_display["is_sale"]
+                                if f_ns:
+                                    mask &= df_display["is_no_show"]
+
+                                st.dataframe(df_display.loc[mask, show_cols].reset_index(drop=True), use_container_width=True)
+                                st.caption("Close this popup to return to summaries.")
+                                if st.button("Close", key=f"close_rep_modal_{sel_rep}"):
+                                    del st.session_state["open_rep_modal"]
+
+                    # ---- COMPANY TOTALS ----
+                    with t2:
+                        st.dataframe(_format_percent_columns(company), use_container_width=True)
+
+                    # ---- HARVESTER SUMMARY with per-row 'View' buttons + modal ----
+                    with t3:
+                        st.dataframe(_format_percent_columns(harv_table), use_container_width=True)
+
+                        st.markdown("**Click a row’s 🔍 View to open details:**")
+                        # Standardize first column name to 'Harvester' (done above)
+                        for i, row in harvester.reset_index(drop=True).iterrows():
+                            harv_val = str(row.get("Harvester", row.iloc[0]))
+                            if st.button(f"🔍 View • {harv_val}", key=f"harv_view_{i}"):
+                                st.session_state["open_harv_modal"] = harv_val
+
+                        # Open modal if a harvester was clicked
+                        if "open_harv_modal" in st.session_state:
+                            sel_harv = st.session_state["open_harv_modal"]
+                            with st.modal(f"Harvester Details — {sel_harv}"):
+                                d1, d2 = st.columns(2)
+                                hf_sit  = d1.checkbox("Only Sits (Harvester logic)", key=f"harv_only_sits_modal_{sel_harv}")  # includes 'New Roof'
+                                hf_sale = d2.checkbox("Only Sales", key=f"harv_only_sales_modal_{sel_harv}")
+
+                                mask = (df_display["Harvester"].astype(str) == sel_harv)
+                                if hf_sit:
+                                    mask &= df_display["is_sit_harvester"]
+                                if hf_sale:
+                                    mask &= df_display["is_sale"]
+
+                                st.dataframe(df_display.loc[mask, show_cols].reset_index(drop=True), use_container_width=True)
+                                st.caption("Close this popup to return to summaries.")
+                                if st.button("Close", key=f"close_harv_modal_{sel_harv}"):
+                                    del st.session_state["open_harv_modal"]
+
+                    # ---- HARVESTER PAY (plain table) ----
+                    with t4:
+                        st.dataframe(harvester_pay, use_container_width=True)
+
+                except Exception as e:
+                    st.error(f"Couldn't render on-page report: {e}")
+
+            # -------- Diagnostics to troubleshoot mapping / statuses / currency --------
+            with st.expander("🔎 Diagnostics (if numbers look wrong)"):
+                try:
+                    df_norm = normalize_columns(df)
+                    st.write("**Columns in your file:**", list(df_norm.columns))
+
+                    cols_resolved = ensure_columns(df_norm, cfg)
+                    st.write("**Resolved column mapping (what the app will use):**")
+                    st.json(cols_resolved)
+
+                    # Status distribution
+                    status_col = cols_resolved["status"]
+                    status_values = (
+                        df_norm[status_col].astype(str).str.strip()
+                        .value_counts(dropna=False)
+                        .reset_index()
+                        .rename(columns={"index": "Status", status_col: "Count"})
+                    )
+                    st.write("**Status values found in your file (top 50):**")
+                    st.dataframe(status_values.head(50), use_container_width=True)
+
+                    # Tag & counts
+                    df_tagged2 = tag_statuses(df_norm, status_col, cfg)
+                    st.write("**Flag counts:**", {
+                        "is_sit_sales sum": int(df_tagged2["is_sit_sales"].sum()),
+                        "is_sit_harvester sum": int(df_tagged2["is_sit_harvester"].sum()),
+                        "is_sale sum": int(df_tagged2["is_sale"].sum()),
+                        "is_no_show sum": int(df_tagged2["is_no_show"].sum()),
+                        "total rows": int(df_tagged2.shape[0]),
+                    })
+
+                    # Contract column check
+                    amt_col2 = cols_resolved["total_contract"]
+                    st.write("**Contract column sample (raw first 5):**", df_norm[amt_col2].head(5).tolist())
+                    st.write("**Contract column sample (cleaned first 5):**", to_currency_numeric(df_norm[amt_col2]).head(5).tolist())
+
+                    # Sum of sales $ (cleaned)
+                    sales_amt_sum = float(to_currency_numeric(df_tagged2.loc[df_tagged2["is_sale"], amt_col2]).sum())
+                    st.write("**Sum of $ for rows marked as Sales (cleaned):**", sales_amt_sum)
+
+                    st.info("If flag counts are 0, fix the **Settings** tab (Sit/Sale/No-Show lists) to match the Status values above. If mapping is wrong, edit weekly_report_config.json to match your headers exactly.")
+                except Exception as e:
+                    st.error(f"Diagnostics failed: {e}")
+
+            with st.expander("Preview uploaded data (first 100 rows)"):
+                st.dataframe(df.head(100), use_container_width=True)
+
+        except KeyError as e:
+            st.error(f"Column mismatch: {e}")
+        except ValueError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.error(f"Error: {e}")
+    else:
+        st.info("Upload a file on the Reports tab to generate your report.")
