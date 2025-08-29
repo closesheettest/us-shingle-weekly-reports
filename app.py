@@ -174,14 +174,16 @@ with tabs[0]:
                     with t4:
                         st.dataframe(harvester_pay, use_container_width=True)
 
+                    # ----- DRILLDOWNS -----
                     with t5:
                         st.subheader("Sales Rep Drilldown")
                         reps = sorted(df_display[cols_map["sales_rep"]].dropna().astype(str).unique().tolist())
                         rep_pick = st.selectbox("Choose a Sales Rep", options=["-- Select --"] + reps, key="rep_pick")
                         c1, c2, c3 = st.columns(3)
-                        f_sit  = c1.checkbox("Only Sits (Sales logic)")
-                        f_sale = c2.checkbox("Only Sales")
-                        f_ns   = c3.checkbox("Only No-Shows")
+                        # unique keys added to avoid duplicate widget IDs
+                        f_sit  = c1.checkbox("Only Sits (Sales logic)", key="rep_only_sits")
+                        f_sale = c2.checkbox("Only Sales", key="rep_only_sales")
+                        f_ns   = c3.checkbox("Only No-Shows", key="rep_only_noshow")
 
                         if rep_pick and rep_pick != "-- Select --":
                             mask = (df_display[cols_map["sales_rep"]].astype(str) == rep_pick)
@@ -198,8 +200,9 @@ with tabs[0]:
                         harvesters = sorted(df_display["Harvester"].dropna().astype(str).unique().tolist())
                         harv_pick = st.selectbox("Choose a Harvester", options=["-- Select --"] + harvesters, key="harv_pick")
                         d1, d2 = st.columns(2)
-                        hf_sit  = d1.checkbox("Only Sits (Harvester logic)")  # includes 'New Roof'
-                        hf_sale = d2.checkbox("Only Sales")
+                        # unique keys added here too
+                        hf_sit  = d1.checkbox("Only Sits (Harvester logic)", key="harv_only_sits")  # includes 'New Roof'
+                        hf_sale = d2.checkbox("Only Sales", key="harv_only_sales")
 
                         if harv_pick and harv_pick != "-- Select --":
                             mask = (df_display["Harvester"].astype(str) == harv_pick)
