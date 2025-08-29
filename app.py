@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import io
 from datetime import datetime
+import re
 
 from report_utils import (
     load_config_from_path,
@@ -75,12 +76,17 @@ def make_override_id(row, cols_map):
     dc = str(row[cols_map["date_created"]])
     return f"{j} | {sd} | {dc}"
 
+def key_from_oid(oid: str) -> str:
+    # Stable widget key per record
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", oid)
+    return f"note_{safe}"[:256]  # guard length
+
 # ---------------- Apply per-row overrides (Harvester sits only) ----------------
-def apply_harvester_overrides(df_tagged: pd.DataFrame, override_ids: set) -> pd.DataFrame:
-    if not override_ids:
+def apply_harvester_overrides(df_tagged: pd.DataFrame, override_ids_with_notes: set) -> pd.DataFrame:
+    if not override_ids_with_notes:
         return df_tagged
     df2 = df_tagged.copy()
-    df2.loc[df2["override_id"].isin(override_ids), "is_sit_harvester"] = True
+    df2.loc[df2["override_id"].isin(override_ids_with_notes), "is_sit_harvester"] = True
     return df2
 
 # ---------------- Build print-friendly HTML ----------------
@@ -134,8 +140,8 @@ def trigger_rerun():
 ss = st.session_state
 ss.setdefault("data_ready", False)
 ss.setdefault("show_on_page", False)
-ss.setdefault("harv_overrides", set())       # set of override_id
-ss.setdefault("harv_override_notes", {})     # override_id -> note
+ss.setdefault("harv_overrides", set())       # set of override_id currently selected
+ss.setdefault("harv_override_notes", {})     # override_id -> note (for selected records only)
 
 # ---------------- UI ----------------
 tabs = st.tabs(["📂 Reports", "🔧 Settings"])
@@ -154,7 +160,7 @@ with tabs[1]:
 
 with tabs[0]:
     st.title("📊 US Shingle Weekly Reports")
-    st.caption("Upload once. Toggle **Show on-page report** to keep it visible. Harvester tab lets you override ANY row to count as a sit (Harvester-only).")
+    st.caption("Upload once. Toggle **Show on-page report** to keep it visible. Harvester tab lets you override ANY row to count as a sit (Harvester-only). Each overridden record requires its own note.")
 
     uploaded_data = st.file_uploader(
         "Upload weekly data (.csv, .xlsx, .xlsm, .xls, .xlsb)",
@@ -236,17 +242,20 @@ with tabs[0]:
             cols_map      = ss["cols_map"]
             show_cols     = ss["show_cols"]
 
-            # Apply all overrides to harvester logic (numbers update immediately)
-            overrides_all = set(ss.get("harv_overrides", set()))
+            # 👉 Apply ONLY overrides that have a non-empty note
+            selected_oids = set(ss.get("harv_overrides", set()))
             notes_map = ss.get("harv_override_notes", {})
+            valid_oids = {oid for oid in selected_oids if str(notes_map.get(oid, "")).strip()}
+            if selected_oids and len(valid_oids) < len(selected_oids):
+                st.warning("Overrides without notes are ignored. Add a note to apply them.", icon="⚠️")
 
-            df_effective = apply_harvester_overrides(df_tagged, overrides_all)
+            df_effective = apply_harvester_overrides(df_tagged, valid_oids)
             harv_summary_effective = compute_harvester_report(df_effective, cols_map)
             harv_pay_effective = compute_harvester_pay(harv_summary_effective)
 
-            # ---- NEW: Add "Overrides Applied" count per harvester to the summary ----
-            if overrides_all:
-                over_mask = df_effective["override_id"].isin(overrides_all)
+            # Count overrides applied per harvester
+            if valid_oids:
+                over_mask = df_effective["override_id"].isin(valid_oids)
                 by_h_counts = (
                     df_effective.loc[over_mask]
                     .groupby("Harvester", dropna=False)
@@ -261,9 +270,9 @@ with tabs[0]:
             else:
                 harv_summary_effective["Overrides Applied"] = pd.Series([0]*len(harv_summary_effective), dtype="Int64")
 
-            # Build "overrides with notes" table for print/export and on-page view
-            if overrides_all:
-                over_mask_base = df_tagged["override_id"].isin(overrides_all)
+            # Build table of applied overrides (with notes)
+            if valid_oids:
+                over_mask_base = df_tagged["override_id"].isin(valid_oids)
                 overrides_table = df_tagged.loc[
                     over_mask_base,
                     [cols_map["job_name"], cols_map["start_date"], cols_map["date_created"], "Harvester", "override_id"]
@@ -279,7 +288,7 @@ with tabs[0]:
 
             def inject_override_cols(df_in: pd.DataFrame) -> pd.DataFrame:
                 out = df_in.copy()
-                out["Override Applied (Harvester Sit)"] = out["override_id"].isin(overrides_all)
+                out["Override Applied (Harvester Sit)"] = out["override_id"].isin(valid_oids)
                 out["Override Note"] = out["override_id"].map(lambda oid: notes_map.get(oid, ""))
                 return out
 
@@ -316,10 +325,10 @@ with tabs[0]:
 
             # --- Harvester Summary WITH per-row overrides + drilldown & picker ---
             with t3:
-                st.info("This table reflects **your per-row overrides**. Added column: **Overrides Applied**.")
+                st.info("This table reflects **per-row overrides**. Each selected record MUST have its own note to apply.")
                 st.dataframe(_format_percent_columns(harv_summary_effective), use_container_width=True)
 
-                st.markdown("### 🔧 Overrides: Mark ANY rows as Harvester Sits")
+                st.markdown("### 🔧 Overrides: Mark ANY rows as Harvester Sits (Note required per record)")
                 harvesters = ["-- Select --"] + harv_summary_effective["Harvester"].astype(str).tolist()
                 sel_harv = st.selectbox("Choose a Harvester to manage overrides", harvesters, key="ov_sel_harv")
 
@@ -327,7 +336,7 @@ with tabs[0]:
                     cols_for_labels = [
                         cols_map["job_name"], cols_map["start_date"], cols_map["date_created"], "override_id"
                     ]
-                    subset = df_effective.loc[df_effective["Harvester"].astype(str) == sel_harv, cols_for_labels].copy()
+                    subset = df_tagged.loc[df_tagged["Harvester"].astype(str) == sel_harv, cols_for_labels].copy()
 
                     if subset.empty:
                         st.caption("No rows for this harvester.")
@@ -351,75 +360,85 @@ with tabs[0]:
                             key=f"ov_ms_{sel_harv}"
                         )
 
-                        new_overrides = (existing - set(options)) | set(selected)
-                        if new_overrides != ss["harv_overrides"]:
-                            ss["harv_overrides"] = set(new_overrides)
-                            trigger_rerun()
+                        # Update selection and drop notes for deselected records (so re-select requires a fresh note)
+                        new_selected = set(selected)
+                        deselected = existing - new_selected
+                        if deselected:
+                            for oid in deselected:
+                                ss["harv_override_notes"].pop(oid, None)
+                        if new_selected != existing:
+                            ss["harv_overrides"] = new_selected
+                            st.experimental_rerun()
 
-                        # Notes editor for the selected rows
-                        st.markdown("#### ✍️ Notes (optional, for each selected override)")
+                        # Notes editor — REQUIRED per selected record
+                        st.markdown("#### ✍️ Notes (required per selected override)")
                         notes_map = dict(ss.get("harv_override_notes", {}))
                         any_changed = False
                         for oid in selected:
-                            key = f"note_{hash(oid)}"
-                            default_note = notes_map.get(oid, "")
+                            k = key_from_oid(oid)
+                            # Do NOT pre-fill with any other record’s note. Only show saved note for THIS record (if any).
+                            current_val = notes_map.get(oid, "")
                             note_text = st.text_input(
                                 f"Reason for overriding: {labels_map.get(oid, oid)}",
-                                value=default_note,
-                                key=key
+                                value=current_val,
+                                key=k,
+                                placeholder="Required: enter reason for this record"
                             )
-                            if note_text != default_note:
+                            if note_text != current_val:
                                 any_changed = True
                             notes_map[oid] = note_text
                         if any_changed:
                             ss["harv_override_notes"] = notes_map
+                            st.experimental_rerun()
 
-                        # Drilldown after overrides
+                        # Quick drilldown after applying ONLY valid overrides
                         st.markdown("#### 🔎 Drilldown for selected Harvester (after overrides)")
                         d1, d2 = st.columns(2)
                         hf_sit  = d1.checkbox("Only Sits (Harvester logic)", key="harv_sits_filter")
                         hf_sale = d2.checkbox("Only Sales", key="harv_sales_filter")
 
-                        mask2 = (df_effective["Harvester"].astype(str) == sel_harv)
-                        if hf_sit:  mask2 &= df_effective["is_sit_harvester"]
-                        if hf_sale: mask2 &= df_effective["is_sale"]
-                        drill2 = df_effective.loc[mask2, show_cols + ["override_id"]].copy()
-                        drill2["Override Applied (Harvester Sit)"] = drill2["override_id"].isin(ss["harv_overrides"])
+                        valid_oids = {oid for oid in ss["harv_overrides"] if str(ss['harv_override_notes'].get(oid, '')).strip()}
+                        df_effective2 = apply_harvester_overrides(df_tagged, valid_oids)
+                        mask2 = (df_effective2["Harvester"].astype(str) == sel_harv)
+                        if hf_sit:  mask2 &= df_effective2["is_sit_harvester"]
+                        if hf_sale: mask2 &= df_effective2["is_sale"]
+                        drill2 = df_effective2.loc[mask2, show_cols + ["override_id"]].copy()
+                        drill2["Override Applied (Harvester Sit)"] = drill2["override_id"].isin(valid_oids)
                         drill2["Override Note"] = drill2["override_id"].map(lambda oid: ss["harv_override_notes"].get(oid, ""))
                         st.dataframe(drill2.drop(columns=["override_id"]).reset_index(drop=True), use_container_width=True)
 
-                # Show overrides + notes on this tab too
-                st.markdown("### 📝 Override Notes (all overridden rows)")
-                if not overrides_all:
-                    st.caption("No overrides applied yet.")
+                # Show applied overrides + notes
+                st.markdown("### 📝 Override Notes (applied records)")
+                if not valid_oids:
+                    st.caption("No valid overrides yet. Select records and enter notes.")
                 else:
                     show_overrides = overrides_table.drop(columns=["override_id"])
                     st.dataframe(show_overrides, use_container_width=True)
 
-                # CSV downloads (summary/pay and audit of overridden rows + notes)
-                cdl1, cdl2, cdl3 = st.columns(3)
-                cdl1.download_button(
+                # CSV downloads
+                c1, c2, c3 = st.columns(3)
+                c1.download_button(
                     "⬇️ Download Harvester Summary (with overrides) — CSV",
                     data=harv_summary_effective.to_csv(index=False).encode("utf-8"),
                     file_name="Harvester_Summary_with_Overrides.csv",
                     mime="text/csv",
                     key="dl_harv_sum_csv"
                 )
-                cdl2.download_button(
+                c2.download_button(
                     "⬇️ Download Harvester Pay (with overrides) — CSV",
                     data=harv_pay_effective.to_csv(index=False).encode("utf-8"),
                     file_name="Harvester_Pay_with_Overrides.csv",
                     mime="text/csv",
                     key="dl_harv_pay_csv"
                 )
-                if overrides_all:
-                    audit_mask = df_tagged["override_id"].isin(overrides_all)
+                if valid_oids:
+                    audit_mask = df_tagged["override_id"].isin(valid_oids)
                     audit = df_tagged.loc[audit_mask, [
                         cols_map["job_name"], cols_map["start_date"], cols_map["date_created"],
                         cols_map["status"], cols_map["sales_rep"], "Harvester",
                         cols_map["total_contract"], "override_id"
                     ]].copy()
-                    audit["Override Note"] = audit["override_id"].map(lambda oid: notes_map.get(oid, ""))
+                    audit["Override Note"] = audit["override_id"].map(lambda oid: ss["harv_override_notes"].get(oid, ""))
                     audit = audit.rename(columns={
                         cols_map["job_name"]: "Job Name",
                         cols_map["start_date"]: "Start Date",
@@ -428,7 +447,7 @@ with tabs[0]:
                         cols_map["sales_rep"]: "Sales Rep",
                         cols_map["total_contract"]: "Total Contract",
                     })
-                    cdl3.download_button(
+                    c3.download_button(
                         "⬇️ Download Overridden Rows + Notes (CSV)",
                         data=audit.drop(columns=["override_id"]).to_csv(index=False).encode("utf-8"),
                         file_name="Harvester_Overrides_With_Notes.csv",
@@ -452,7 +471,7 @@ with tabs[0]:
                 st.dataframe(_format_percent_columns(harv_summary_effective), use_container_width=True)
                 st.subheader("Harvester Pay (with overrides)")
                 st.dataframe(harv_pay_effective, use_container_width=True)
-                st.subheader("Override Notes (all overridden rows)")
+                st.subheader("Override Notes (applied records)")
                 if not overrides_table.empty:
                     show_overrides = overrides_table.drop(columns=["override_id"])
                     st.dataframe(show_overrides, use_container_width=True)
