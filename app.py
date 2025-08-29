@@ -25,6 +25,16 @@ APP_DIR = Path(__file__).parent
 DEFAULT_CONFIG_PATH = APP_DIR / "weekly_report_config.json"
 SETTINGS_PATH = APP_DIR / "settings.json"
 
+# ---------------- Rerun helper (works with new & old Streamlit) ----------------
+def trigger_rerun():
+    try:
+        st.rerun()  # Streamlit >= 1.27
+    except Exception:
+        try:
+            st.experimental_rerun()  # older Streamlit
+        except Exception:
+            pass
+
 # ---------------- Settings helpers ----------------
 def get_settings():
     defaults = {
@@ -77,9 +87,8 @@ def make_override_id(row, cols_map):
     return f"{j} | {sd} | {dc}"
 
 def key_from_oid(oid: str) -> str:
-    # Stable widget key per record
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", oid)
-    return f"note_{safe}"[:256]  # guard length
+    return f"note_{safe}"[:256]
 
 # ---------------- Apply per-row overrides (Harvester sits only) ----------------
 def apply_harvester_overrides(df_tagged: pd.DataFrame, override_ids_with_notes: set) -> pd.DataFrame:
@@ -129,13 +138,6 @@ def build_print_html(
 
     return "\n".join(html)
 
-# ---------------- Rerun helper ----------------
-def trigger_rerun():
-    try:
-        st.rerun()
-    except Exception:
-        st.experimental_rerun()
-
 # ---------------- Init session ----------------
 ss = st.session_state
 ss.setdefault("data_ready", False)
@@ -160,7 +162,7 @@ with tabs[1]:
 
 with tabs[0]:
     st.title("📊 US Shingle Weekly Reports")
-    st.caption("Upload once. Toggle **Show on-page report** to keep it visible. Harvester tab lets you override ANY row to count as a sit (Harvester-only). Each overridden record requires its own note.")
+    st.caption("Upload once. Toggle **Show on-page report** to keep it visible. Harvester tab lets you override ANY row to count as a sit (Harvester-only). Each overridden record requires its own note to be applied.")
 
     uploaded_data = st.file_uploader(
         "Upload weekly data (.csv, .xlsx, .xlsm, .xls, .xlsb)",
@@ -242,7 +244,7 @@ with tabs[0]:
             cols_map      = ss["cols_map"]
             show_cols     = ss["show_cols"]
 
-            # 👉 Apply ONLY overrides that have a non-empty note
+            # Apply ONLY overrides that have a non-empty note
             selected_oids = set(ss.get("harv_overrides", set()))
             notes_map = ss.get("harv_override_notes", {})
             valid_oids = {oid for oid in selected_oids if str(notes_map.get(oid, "")).strip()}
@@ -360,7 +362,7 @@ with tabs[0]:
                             key=f"ov_ms_{sel_harv}"
                         )
 
-                        # Update selection and drop notes for deselected records (so re-select requires a fresh note)
+                        # Update selection; drop notes for deselected records (so re-select requires a fresh note)
                         new_selected = set(selected)
                         deselected = existing - new_selected
                         if deselected:
@@ -368,16 +370,15 @@ with tabs[0]:
                                 ss["harv_override_notes"].pop(oid, None)
                         if new_selected != existing:
                             ss["harv_overrides"] = new_selected
-                            st.experimental_rerun()
+                            trigger_rerun()
 
                         # Notes editor — REQUIRED per selected record
                         st.markdown("#### ✍️ Notes (required per selected override)")
-                        notes_map = dict(ss.get("harv_override_notes", {}))
+                        notes_map2 = dict(ss.get("harv_override_notes", {}))
                         any_changed = False
                         for oid in selected:
                             k = key_from_oid(oid)
-                            # Do NOT pre-fill with any other record’s note. Only show saved note for THIS record (if any).
-                            current_val = notes_map.get(oid, "")
+                            current_val = notes_map2.get(oid, "")
                             note_text = st.text_input(
                                 f"Reason for overriding: {labels_map.get(oid, oid)}",
                                 value=current_val,
@@ -386,24 +387,24 @@ with tabs[0]:
                             )
                             if note_text != current_val:
                                 any_changed = True
-                            notes_map[oid] = note_text
+                            notes_map2[oid] = note_text
                         if any_changed:
-                            ss["harv_override_notes"] = notes_map
-                            st.experimental_rerun()
+                            ss["harv_override_notes"] = notes_map2
+                            trigger_rerun()
 
-                        # Quick drilldown after applying ONLY valid overrides
+                        # Drilldown after applying ONLY valid overrides
                         st.markdown("#### 🔎 Drilldown for selected Harvester (after overrides)")
                         d1, d2 = st.columns(2)
                         hf_sit  = d1.checkbox("Only Sits (Harvester logic)", key="harv_sits_filter")
                         hf_sale = d2.checkbox("Only Sales", key="harv_sales_filter")
 
-                        valid_oids = {oid for oid in ss["harv_overrides"] if str(ss['harv_override_notes'].get(oid, '')).strip()}
-                        df_effective2 = apply_harvester_overrides(df_tagged, valid_oids)
+                        valid_oids2 = {oid for oid in ss["harv_overrides"] if str(ss['harv_override_notes'].get(oid, '')).strip()}
+                        df_effective2 = apply_harvester_overrides(df_tagged, valid_oids2)
                         mask2 = (df_effective2["Harvester"].astype(str) == sel_harv)
                         if hf_sit:  mask2 &= df_effective2["is_sit_harvester"]
                         if hf_sale: mask2 &= df_effective2["is_sale"]
                         drill2 = df_effective2.loc[mask2, show_cols + ["override_id"]].copy()
-                        drill2["Override Applied (Harvester Sit)"] = drill2["override_id"].isin(valid_oids)
+                        drill2["Override Applied (Harvester Sit)"] = drill2["override_id"].isin(valid_oids2)
                         drill2["Override Note"] = drill2["override_id"].map(lambda oid: ss["harv_override_notes"].get(oid, ""))
                         st.dataframe(drill2.drop(columns=["override_id"]).reset_index(drop=True), use_container_width=True)
 
