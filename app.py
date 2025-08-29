@@ -12,6 +12,8 @@ from report_utils import (
     ensure_columns,
     tag_statuses,
     to_currency_numeric,
+    compute_harvester_report,
+    compute_harvester_pay,
 )
 
 # ---------------- Page config ----------------
@@ -51,6 +53,8 @@ def merge_settings_into_config(cfg, settings):
     cfg["_sit_statuses_lc"] = [s.lower() for s in cfg["sit_statuses"]]
     cfg["_sale_statuses_lc"] = [s.lower() for s in cfg["sale_statuses"]]
     cfg["_no_show_statuses_lc"] = [s.lower() for s in cfg["no_show_statuses"]]
+    # IMPORTANT: global “rescheduled counts as sit” is OFF; per-row overrides handle it now
+    cfg["harvester_rescheduled_counts_as_sit"] = False
     return cfg
 
 # ---------------- Pretty % helper ----------------
@@ -63,10 +67,28 @@ def _format_percent_columns(df: pd.DataFrame) -> pd.DataFrame:
             ).round(0).astype("Int64").astype(str) + "%"
     return out
 
+# ---------------- Row identity for overrides ----------------
+def make_override_id(row, cols_map):
+    # Stable identity using fields the sheet already has
+    j = str(row[cols_map["job_name"]])
+    sd = str(row[cols_map["start_date"]])
+    dc = str(row[cols_map["date_created"]])
+    return f"{j} | {sd} | {dc}"
+
+# ---------------- Apply per-row overrides (Harvester sits only) ----------------
+def apply_harvester_overrides(df_tagged: pd.DataFrame, override_ids: set) -> pd.DataFrame:
+    if not override_ids:
+        return df_tagged
+    df2 = df_tagged.copy()
+    df2.loc[df2["override_id"].isin(override_ids), "is_sit_harvester"] = True
+    return df2
+
 # ---------------- Init session ----------------
 ss = st.session_state
 ss.setdefault("data_ready", False)
 ss.setdefault("show_on_page", False)
+# per-row harvester overrides (set of override_id strings)
+ss.setdefault("harv_overrides", set())
 
 # ---------------- UI ----------------
 tabs = st.tabs(["📂 Reports", "🔧 Settings"])
@@ -85,7 +107,7 @@ with tabs[1]:
 
 with tabs[0]:
     st.title("📊 US Shingle Weekly Reports")
-    st.caption("Upload once. Toggle **Show on-page report** to keep it visible. Use the dropdowns to drill down by Sales Rep or Harvester.")
+    st.caption("Upload once. Toggle **Show on-page report** to keep it visible. Drill down by Sales Rep or Harvester. In the Harvester tab you can override ANY row to count as a sit (Harvester-only).")
 
     # Upload
     uploaded_data = st.file_uploader(
@@ -94,32 +116,28 @@ with tabs[0]:
         key="uploader"
     )
 
-    # ✅ Option for Harvester rescheduled logic
-    st.markdown("#### Harvester Counting Option")
-    harv_count_resched = st.checkbox(
-        'Count **"No Sit - rescheduled"** as a **Sit** in Harvester metrics (does **not** affect Sales)',
-        value=False
-    )
-
     # Process the uploaded file
     if uploaded_data is not None:
         try:
             cfg = load_config_from_path(DEFAULT_CONFIG_PATH)
             cfg = merge_settings_into_config(cfg, get_settings())
-            # Pass the checkbox choice to config so report_utils uses it
-            cfg["harvester_rescheduled_counts_as_sit"] = bool(harv_count_resched)
 
             df = read_input_file(uploaded_data)
-            wb_bytes = build_workbook(df, cfg)
+            wb_bytes = build_workbook(df, cfg)  # official download (no per-row overrides)
 
-            # Tag for drilldowns (same rules as workbook)
+            # Tag for drilldowns (same base rules as workbook)
             df_norm   = normalize_columns(df)
             cols_map  = ensure_columns(df_norm, cfg)
             df_tagged = tag_statuses(df_norm, cols_map["status"], cfg)
+
+            # Precompute convenience columns
             df_tagged["Harvester"] = (
                 df_tagged[cols_map["appointment_set_by"]].fillna("").astype(str).str.strip().replace("", "Company")
             )
             df_tagged["$ Amount (clean)"] = to_currency_numeric(df_tagged[cols_map["total_contract"]])
+            # Add helper columns
+            df_tagged["_status_lc"] = df_tagged[cols_map["status"]].astype(str).str.strip().str.lower()
+            df_tagged["override_id"] = df_tagged.apply(lambda r: make_override_id(r, cols_map), axis=1)
 
             show_cols = [
                 cols_map["job_name"],
@@ -146,12 +164,14 @@ with tabs[0]:
             ss["wb_bytes"] = wb_bytes
             ss["rep_summary_df"] = rep_summary
             ss["company_df"] = company
-            ss["harvester_df"] = harvester
-            ss["harvester_pay_df"] = harvester_pay
+            ss["harvester_df"] = harvester      # base (no overrides)
+            ss["harvester_pay_df"] = harvester_pay  # base (no overrides)
             ss["df_tagged"] = df_tagged
             ss["cols_map"] = cols_map
             ss["show_cols"] = show_cols
             ss["data_ready"] = True
+            # Reset per-row overrides when a new file is uploaded
+            ss["harv_overrides"] = set()
 
             st.success("File processed. You can download or show the report on page.")
 
@@ -160,8 +180,9 @@ with tabs[0]:
 
     # If we have data, show controls + content
     if ss["data_ready"]:
+        # Official unmodified workbook download
         st.download_button(
-            "⬇️ Download Weekly_Reports.xlsx",
+            "⬇️ Download Weekly_Reports.xlsx (no overrides)",
             data=ss["wb_bytes"],
             file_name="Weekly_Reports.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -174,20 +195,24 @@ with tabs[0]:
         if ss["show_on_page"]:
             rep_summary   = ss["rep_summary_df"]
             company       = ss["company_df"]
-            harvester     = ss["harvester_df"]
-            harvester_pay = ss["harvester_pay_df"]
             df_tagged     = ss["df_tagged"]
             cols_map      = ss["cols_map"]
             show_cols     = ss["show_cols"]
+            overrides_set = set(ss.get("harv_overrides", set()))
+
+            # Build an "effective" df where selected override rows are counted as Harvester sits
+            df_effective = apply_harvester_overrides(df_tagged, overrides_set)
+            harv_summary_effective = compute_harvester_report(df_effective, cols_map)
+            harv_pay_effective = compute_harvester_pay(harv_summary_effective)
 
             t1, t2, t3, t4 = st.tabs([
                 "Sales Rep Summary",
                 "Company Totals",
-                "Harvester Summary",
-                "Harvester Pay",
+                "Harvester Summary (with overrides)",
+                "Harvester Pay (with overrides)",
             ])
 
-            # --- Sales Rep Summary + DRILLDOWN (inline) ---
+            # --- Sales Rep Summary (unchanged by overrides) ---
             with t1:
                 st.dataframe(_format_percent_columns(rep_summary), use_container_width=True)
                 st.markdown("### 🔎 Drilldown by Sales Rep")
@@ -199,34 +224,88 @@ with tabs[0]:
                 f_ns   = c3.checkbox("Only No-Shows", key="rep_noshow_filter")
 
                 if sel_rep and sel_rep != "-- Select --":
-                    mask = (df_tagged[cols_map["sales_rep"]].astype(str) == sel_rep)
-                    if f_sit:  mask &= df_tagged["is_sit_sales"]
-                    if f_sale: mask &= df_tagged["is_sale"]
-                    if f_ns:   mask &= df_tagged["is_no_show"]
-                    st.dataframe(df_tagged.loc[mask, show_cols].reset_index(drop=True), use_container_width=True)
+                    mask = (df_effective[cols_map["sales_rep"]].astype(str) == sel_rep)
+                    if f_sit:  mask &= df_effective["is_sit_sales"]
+                    if f_sale: mask &= df_effective["is_sale"]
+                    if f_ns:   mask &= df_effective["is_no_show"]
+                    st.dataframe(df_effective.loc[mask, show_cols].reset_index(drop=True), use_container_width=True)
 
-            # --- Company Totals ---
+            # --- Company Totals (Sales-based; unaffected by overrides) ---
             with t2:
                 st.dataframe(_format_percent_columns(company), use_container_width=True)
 
-            # --- Harvester Summary + DRILLDOWN (inline) ---
+            # --- Harvester Summary WITH per-row overrides + drilldown & picker ---
             with t3:
-                st.dataframe(_format_percent_columns(harvester), use_container_width=True)
-                st.markdown("### 🔎 Drilldown by Harvester")
-                harvesters = ["-- Select --"] + harvester.iloc[:, 0].astype(str).tolist()
-                sel_harv = st.selectbox("Choose a Harvester", harvesters, key="sel_harv")
-                d1, d2 = st.columns(2)
-                hf_sit  = d1.checkbox("Only Sits (Harvester logic)", key="harv_sits_filter")  # includes 'New Roof' and optional 'No Sit - rescheduled'
-                hf_sale = d2.checkbox("Only Sales", key="harv_sales_filter")
+                st.info("This table reflects **your per-row overrides** for Harvester sits.")
+                st.dataframe(_format_percent_columns(harv_summary_effective), use_container_width=True)
+
+                st.markdown("### 🔧 Overrides: Mark ANY rows as Harvester Sits")
+                # Choose a harvester to manage rows
+                harvesters = ["-- Select --"] + harv_summary_effective["Harvester"].astype(str).tolist()
+                sel_harv = st.selectbox("Choose a Harvester to manage overrides", harvesters, key="ov_sel_harv")
 
                 if sel_harv and sel_harv != "-- Select --":
-                    mask = (df_tagged["Harvester"].astype(str) == sel_harv)
-                    if hf_sit:  mask &= df_tagged["is_sit_harvester"]
-                    if hf_sale: mask &= df_tagged["is_sale"]
-                    st.dataframe(df_tagged.loc[mask, show_cols].reset_index(drop=True), use_container_width=True)
+                    # Show ALL rows for this harvester (you decide which ones count as sits)
+                    cols_for_labels = [
+                        cols_map["job_name"], cols_map["start_date"], cols_map["date_created"], "override_id"
+                    ]
+                    subset = df_effective.loc[df_effective["Harvester"].astype(str) == sel_harv, cols_for_labels].copy()
 
-            # --- Harvester Pay ---
+                    if subset.empty:
+                        st.caption("No rows for this harvester.")
+                    else:
+                        subset["Label"] = (
+                            subset[cols_map["job_name"]].astype(str)
+                            + " — Start: " + subset[cols_map["start_date"]].astype(str)
+                            + " — Created: " + subset[cols_map["date_created"]].astype(str)
+                        )
+                        options = subset["override_id"].tolist()
+                        labels_map = dict(zip(options, subset["Label"].tolist()))
+                        default_vals = [oid for oid in options if oid in overrides_set]
+
+                        selected = st.multiselect(
+                            "Select rows to **count as sits** for Harvester metrics:",
+                            options=options,
+                            default=default_vals,
+                            format_func=lambda oid: labels_map.get(oid, oid),
+                            key=f"ov_ms_{sel_harv}"
+                        )
+
+                        # Update overrides: keep others, replace for current harvester set
+                        new_overrides = (overrides_set - set(options)) | set(selected)
+                        ss["harv_overrides"] = set(new_overrides)
+
+                        # Quick drilldown with current overrides applied
+                        st.markdown("#### 🔎 Drilldown for selected Harvester (after overrides)")
+                        d1, d2 = st.columns(2)
+                        hf_sit  = d1.checkbox("Only Sits (Harvester logic)", key="harv_sits_filter")
+                        hf_sale = d2.checkbox("Only Sales", key="harv_sales_filter")
+                        df_effective = apply_harvester_overrides(df_tagged, set(ss["harv_overrides"]))  # refresh with latest selection
+                        mask2 = (df_effective["Harvester"].astype(str) == sel_harv)
+                        if hf_sit:  mask2 &= df_effective["is_sit_harvester"]
+                        if hf_sale: mask2 &= df_effective["is_sale"]
+                        st.dataframe(df_effective.loc[mask2, show_cols].reset_index(drop=True), use_container_width=True)
+
+                # CSV downloads for overridden Harvester tables
+                cdl1, cdl2 = st.columns(2)
+                cdl1.download_button(
+                    "⬇️ Download Harvester Summary (with overrides) — CSV",
+                    data=harv_summary_effective.to_csv(index=False).encode("utf-8"),
+                    file_name="Harvester_Summary_with_Overrides.csv",
+                    mime="text/csv",
+                    key="dl_harv_sum_csv"
+                )
+                cdl2.download_button(
+                    "⬇️ Download Harvester Pay (with overrides) — CSV",
+                    data=harv_pay_effective.to_csv(index=False).encode("utf-8"),
+                    file_name="Harvester_Pay_with_Overrides.csv",
+                    mime="text/csv",
+                    key="dl_harv_pay_csv"
+                )
+
+            # --- Harvester Pay (with overrides) ---
             with t4:
-                st.dataframe(harvester_pay, use_container_width=True)
+                st.dataframe(harv_pay_effective, use_container_width=True)
+
     else:
         st.info("Upload a file to generate your report (top of this tab).")
