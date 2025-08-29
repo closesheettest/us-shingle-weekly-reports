@@ -96,9 +96,55 @@ def tag_statuses(df: pd.DataFrame, status_col: str, cfg) -> pd.DataFrame:
 
 # ---------- Reports ----------
 def compute_sales_rep_summary(df: pd.DataFrame, cols, truthy: set) -> pd.DataFrame:
-    amt_col, ins_col, rb_col, rep_col = cols["total_contract"], cols["insulation"], cols["radiant_barrier"], cols["sales_rep"]
-    df_ins, df_rb = coerce_bool(df[ins_col], truthy), coerce_bool(df[rb_col], truthy)
+    amt_col = cols["total_contract"]
+    ins_col = cols["insulation"]
+    rb_col  = cols["radiant_barrier"]
+    rep_col = cols["sales_rep"]
+
+    # Coerce add-ons to booleans (True/Yes/1 -> True)
+    df_ins = coerce_bool(df[ins_col], truthy)
+    df_rb  = coerce_bool(df[rb_col], truthy)
+
+    # GROUP BY sales rep
     grp = df.groupby(rep_col, dropna=False)
+
+    # $ amount only from rows that are sales, cleaned as currency
+    def sales_amount_sum(g: pd.DataFrame) -> float:
+        sold_vals = to_currency_numeric(g.loc[g["is_sale"], amt_col])
+        return float(sold_vals.sum())
+
+    # Base counts
+    summary = pd.DataFrame({
+        "Total Appointments": grp.size(),
+        "Total Sits": grp["is_sit_sales"].sum(),   # <-- Sales sit logic
+        "Total Sales": grp["is_sale"].sum(),
+        "$ Sales Amount": grp.apply(sales_amount_sum),
+    })
+
+    # Rates
+    summary["Sit %"] = (summary["Total Sits"] / summary["Total Appointments"]).fillna(0)
+    summary["Sales %"] = (summary["Total Sales"] / summary["Total Sits"]).fillna(0)
+    no_shows = grp["is_no_show"].sum()
+    summary["No Show %"] = (no_shows / summary["Total Appointments"]).fillna(0)
+
+    # Average ticket
+    summary["Avg $ / Sale"] = summary.apply(
+        lambda r: safe_div(r["$ Sales Amount"], r["Total Sales"]), axis=1
+    )
+
+    # Add-on % should be "of Sales" (denominator = number of sales)
+    def pct_addon_of_sales(g: pd.DataFrame, addon_bool: pd.Series) -> float:
+        sold = g[g["is_sale"]]
+        if sold.empty:
+            return 0.0
+        addon_on_sold = addon_bool.loc[sold.index]
+        return float(addon_on_sold.sum()) / len(sold)
+
+    summary["Insulation % (of Sales)"]      = grp.apply(lambda g: pct_addon_of_sales(g, df_ins))
+    summary["Radiant Barrier % (of Sales)"] = grp.apply(lambda g: pct_addon_of_sales(g, df_rb))
+
+    return summary.reset_index(names=[rep_col])
+
 
     def sales_amount_sum(g: pd.DataFrame) -> float:
         return float(to_currency_numeric(g.loc[g["is_sale"], amt_col]).sum())
