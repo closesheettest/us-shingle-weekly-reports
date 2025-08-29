@@ -67,9 +67,6 @@ def _format_percent_columns(df: pd.DataFrame) -> pd.DataFrame:
 ss = st.session_state
 ss.setdefault("data_ready", False)
 ss.setdefault("show_on_page", False)
-# stored artifacts (after upload)
-# ss["wb_bytes"], ss["rep_summary_df"], ss["company_df"], ss["harvester_df"], ss["harvester_pay_df"]
-# ss["df_tagged"], ss["cols_map"], ss["show_cols"]
 
 # ---------------- UI ----------------
 tabs = st.tabs(["📂 Reports", "🔧 Settings"])
@@ -88,25 +85,32 @@ with tabs[1]:
 
 with tabs[0]:
     st.title("📊 US Shingle Weekly Reports")
-    st.caption("Upload once. Toggle **Show on-page report** to keep the report visible. Use the dropdowns to drill down by Sales Rep or Harvester.")
+    st.caption("Upload once. Toggle **Show on-page report** to keep it visible. Drilldowns below.")
 
-    # 1) Upload a file (when you have a new week)
     uploaded_data = st.file_uploader(
         "Upload weekly data (.csv, .xlsx, .xlsm, .xls, .xlsb)",
         type=["csv", "xlsx", "xlsm", "xls", "xlsb"],
         key="uploader"
     )
 
-    # 2) Process the file and store everything in session
+    # ✅ NEW: Option for Harvester rescheduled logic
+    st.markdown("#### Harvester Counting Option")
+    harv_count_resched = st.checkbox(
+        'Count **"No Sit - rescheduled"** as a **Sit** in Harvester metrics (does **not** affect Sales)',
+        value=False
+    )
+
     if uploaded_data is not None:
         try:
             cfg = load_config_from_path(DEFAULT_CONFIG_PATH)
             cfg = merge_settings_into_config(cfg, get_settings())
+            # 👇 pass the checkbox into config so report_utils picks it up
+            cfg["harvester_rescheduled_counts_as_sit"] = bool(harv_count_resched)
 
             df = read_input_file(uploaded_data)
             wb_bytes = build_workbook(df, cfg)
 
-            # Build tagged dataframe for drilldowns (same logic as report)
+            # Tag for drilldowns
             df_norm   = normalize_columns(df)
             cols_map  = ensure_columns(df_norm, cfg)
             df_tagged = tag_statuses(df_norm, cols_map["status"], cfg)
@@ -122,19 +126,20 @@ with tabs[0]:
                 cols_map["sales_rep"],
                 "Harvester",
                 cols_map["total_contract"],
-                "is_sit_sales",      # sits for Sales reporting
-                "is_sit_harvester",  # sits for Harvester reporting (includes 'New Roof')
+                "is_sit_sales",
+                "is_sit_harvester",
                 "is_sale",
                 "is_no_show",
             ]
 
-            # Read summary tables back from the generated Excel (matches the download)
+            # Read summaries from Excel
             xls = pd.ExcelFile(io.BytesIO(wb_bytes), engine="openpyxl")
             rep_summary   = pd.read_excel(xls, sheet_name="Sales Rep Summary")
             company       = pd.read_excel(xls, sheet_name="Company Totals")
             harvester     = pd.read_excel(xls, sheet_name="Harvester Summary")
             harvester_pay = pd.read_excel(xls, sheet_name="Harvester Pay")
 
+            # Save to session
             ss["wb_bytes"] = wb_bytes
             ss["rep_summary_df"] = rep_summary
             ss["company_df"] = company
@@ -144,14 +149,12 @@ with tabs[0]:
             ss["cols_map"] = cols_map
             ss["show_cols"] = show_cols
             ss["data_ready"] = True
-            # keep your current show toggle as-is (don’t force it on/off)
 
             st.success("File processed. You can download or show the report on page.")
 
         except Exception as e:
-            st.error(f"Error while processing file: {e}")
+            st.error(f"Error: {e}")
 
-    # 3) If we have data, show controls + content
     if ss["data_ready"]:
         st.download_button(
             "⬇️ Download Weekly_Reports.xlsx",
@@ -161,7 +164,6 @@ with tabs[0]:
             key="download_btn"
         )
 
-        # Persistent toggle (checkbox) instead of momentary button
         ss["show_on_page"] = st.checkbox("👀 Show on-page report", value=ss["show_on_page"])
 
         if ss["show_on_page"]:
@@ -180,47 +182,14 @@ with tabs[0]:
                 "Harvester Pay",
             ])
 
-            # --- Sales Rep Summary + drilldown controls ---
             with t1:
                 st.dataframe(_format_percent_columns(rep_summary), use_container_width=True)
-                st.markdown("### 🔎 Drilldown by Sales Rep")
-                reps = ["-- Select --"] + rep_summary.iloc[:, 0].astype(str).tolist()
-                sel_rep = st.selectbox("Choose a Sales Rep", reps, key="sel_rep")
-                c1, c2, c3 = st.columns(3)
-                f_sit  = c1.checkbox("Only Sits (Sales logic)", key="rep_sits_filter")
-                f_sale = c2.checkbox("Only Sales", key="rep_sales_filter")
-                f_ns   = c3.checkbox("Only No-Shows", key="rep_noshow_filter")
 
-                if sel_rep and sel_rep != "-- Select --":
-                    mask = (df_tagged[cols_map["sales_rep"]].astype(str) == sel_rep)
-                    if f_sit:  mask &= df_tagged["is_sit_sales"]
-                    if f_sale: mask &= df_tagged["is_sale"]
-                    if f_ns:   mask &= df_tagged["is_no_show"]
-                    st.dataframe(df_tagged.loc[mask, show_cols].reset_index(drop=True), use_container_width=True)
-
-            # --- Company Totals ---
             with t2:
                 st.dataframe(_format_percent_columns(company), use_container_width=True)
 
-            # --- Harvester Summary + drilldown controls ---
             with t3:
                 st.dataframe(_format_percent_columns(harvester), use_container_width=True)
-                st.markdown("### 🔎 Drilldown by Harvester")
-                harvesters = ["-- Select --"] + harvester.iloc[:, 0].astype(str).tolist()
-                sel_harv = st.selectbox("Choose a Harvester", harvesters, key="sel_harv")
-                d1, d2 = st.columns(2)
-                hf_sit  = d1.checkbox("Only Sits (Harvester logic)", key="harv_sits_filter")  # includes 'New Roof'
-                hf_sale = d2.checkbox("Only Sales", key="harv_sales_filter")
 
-                if sel_harv and sel_harv != "-- Select --":
-                    mask = (df_tagged["Harvester"].astype(str) == sel_harv)
-                    if hf_sit:  mask &= df_tagged["is_sit_harvester"]
-                    if hf_sale: mask &= df_tagged["is_sale"]
-                    st.dataframe(df_tagged.loc[mask, show_cols].reset_index(drop=True), use_container_width=True)
-
-            # --- Harvester Pay ---
             with t4:
                 st.dataframe(harvester_pay, use_container_width=True)
-
-    else:
-        st.info("Upload a file to generate your report (top of this tab).")
