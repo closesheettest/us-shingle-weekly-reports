@@ -15,7 +15,7 @@ from report_utils import (
     compute_company_totals,
     compute_harvester_report,
     compute_harvester_pay,
-    to_currency_numeric,  # used in diagnostics & drilldowns
+    to_currency_numeric,  # for diagnostics & drilldowns
 )
 
 # ---------------- Page config ----------------
@@ -97,6 +97,17 @@ with tabs[0]:
         type=["csv", "xlsx", "xlsm", "xls", "xlsb"]
     )
 
+    # --- Session defaults for view persistence ---
+    if "show_on_page" not in st.session_state:
+        st.session_state["show_on_page"] = False
+    if "rep_modal" not in st.session_state:
+        st.session_state["rep_modal"] = None
+    if "harv_modal" not in st.session_state:
+        st.session_state["harv_modal"] = None
+
+    # Hold computed artifacts in session so they persist across reruns
+    # Keys we will use: rep_summary_df, company_df, harvester_df, harvester_pay_df, df_display, show_cols, rep_name_col
+
     if uploaded_data is not None:
         try:
             # Load config + merge Settings
@@ -117,63 +128,88 @@ with tabs[0]:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-            # Prepare a tagged dataframe for drilldowns/modals (same logic as report)
-            df_norm   = normalize_columns(df)
-            cols_map  = ensure_columns(df_norm, cfg)
-            df_tagged = tag_statuses(df_norm, cols_map["status"], cfg)
+            # Buttons row
+            c_show, c_hide = st.columns([1, 1])
+            if c_show.button("👀 Show report on page"):
+                # Read back from Excel to ensure exact match with download
+                excel_bytes = io.BytesIO(wb_bytes)
+                xls = pd.ExcelFile(excel_bytes, engine="openpyxl")
+                rep_summary   = pd.read_excel(xls, sheet_name="Sales Rep Summary")
+                company       = pd.read_excel(xls, sheet_name="Company Totals")
+                harvester     = pd.read_excel(xls, sheet_name="Harvester Summary")
+                harvester_pay = pd.read_excel(xls, sheet_name="Harvester Pay")
 
-            # Harvester column same as report (blank -> 'Company')
-            harv_col = cols_map["appointment_set_by"]
-            harv_series = df_tagged[harv_col].fillna("").astype(str).str.strip().replace("", "Company")
+                # Build tagged DF for drilldowns (same logic as report)
+                df_norm   = normalize_columns(df)
+                cols_map  = ensure_columns(df_norm, cfg)
+                df_tagged = tag_statuses(df_norm, cols_map["status"], cfg)
 
-            amt_col = cols_map["total_contract"]
-            df_display = df_tagged.copy()
-            df_display["Harvester"] = harv_series
-            df_display["$ Amount (clean)"] = to_currency_numeric(df_display[amt_col])
+                # Harvester column same as report (blank -> 'Company')
+                harv_col = cols_map["appointment_set_by"]
+                harv_series = df_tagged[harv_col].fillna("").astype(str).str.strip().replace("", "Company")
 
-            # Visible columns in drilldown tables
-            show_cols = [
-                cols_map["job_name"],
-                cols_map["date_created"],
-                cols_map["start_date"],
-                cols_map["status"],
-                cols_map["sales_rep"],
-                "Harvester",
-                amt_col,
-                "is_sit_sales",      # sits for Sales reporting
-                "is_sit_harvester",  # sits for Harvester reporting (includes 'New Roof')
-                "is_sale",
-                "is_no_show",
-            ]
+                amt_col = cols_map["total_contract"]
+                df_display = df_tagged.copy()
+                df_display["Harvester"] = harv_series
+                df_display["$ Amount (clean)"] = to_currency_numeric(df_display[amt_col])
 
-            # -------- Show report on page (read back from Excel so it matches exactly) --------
-            if st.button("👀 Show report on page"):
-                try:
-                    excel_bytes = io.BytesIO(wb_bytes)
-                    xls = pd.ExcelFile(excel_bytes, engine="openpyxl")
+                # Visible columns in drilldown tables
+                show_cols = [
+                    cols_map["job_name"],
+                    cols_map["date_created"],
+                    cols_map["start_date"],
+                    cols_map["status"],
+                    cols_map["sales_rep"],
+                    "Harvester",
+                    amt_col,
+                    "is_sit_sales",      # sits for Sales reporting
+                    "is_sit_harvester",  # sits for Harvester reporting (includes 'New Roof')
+                    "is_sale",
+                    "is_no_show",
+                ]
 
-                    rep_summary   = pd.read_excel(xls, sheet_name="Sales Rep Summary")
-                    company       = pd.read_excel(xls, sheet_name="Company Totals")
-                    harvester     = pd.read_excel(xls, sheet_name="Harvester Summary")
-                    harvester_pay = pd.read_excel(xls, sheet_name="Harvester Pay")
+                # Determine the sales rep column name in summary (first column fallback)
+                rep_name_col = cols_map["sales_rep"]
+                if rep_name_col not in rep_summary.columns:
+                    rep_name_col = rep_summary.columns[0]
 
-                    # Add a '🔍 View' action column for Sales Rep Summary
+                # Store everything in session so it persists after rerun
+                st.session_state["rep_summary_df"] = rep_summary
+                st.session_state["company_df"] = company
+                st.session_state["harvester_df"] = harvester
+                st.session_state["harvester_pay_df"] = harvester_pay
+                st.session_state["df_display"] = df_display
+                st.session_state["show_cols"] = show_cols
+                st.session_state["rep_name_col"] = rep_name_col
+
+                st.session_state["show_on_page"] = True
+
+            if c_hide.button("🙈 Hide on-page report"):
+                st.session_state["show_on_page"] = False
+                st.session_state["rep_modal"] = None
+                st.session_state["harv_modal"] = None
+
+            # ---- Render on-page report if flag is set ----
+            if st.session_state.get("show_on_page", False):
+                rep_summary   = st.session_state.get("rep_summary_df")
+                company       = st.session_state.get("company_df")
+                harvester     = st.session_state.get("harvester_df")
+                harvester_pay = st.session_state.get("harvester_pay_df")
+                df_display    = st.session_state.get("df_display")
+                show_cols     = st.session_state.get("show_cols")
+                rep_name_col  = st.session_state.get("rep_name_col")
+
+                if any(x is None for x in [rep_summary, company, harvester, harvester_pay, df_display, show_cols, rep_name_col]):
+                    st.warning("On-page data not ready. Click 'Show report on page' again.")
+                else:
+                    # Add "Action" column (visual only)
                     rep_table = rep_summary.copy()
-                    rep_name_col = cols_map["sales_rep"]  # this is the column title in the rep summary index reset
-                    # Some files might label the first column differently; ensure we know which it is:
-                    # rep_summary.reset_index(names=[rep_col]) in utils sets the first column to the rep col name.
-                    # Use the first column name as fallback.
                     if rep_name_col not in rep_table.columns:
                         rep_name_col = rep_table.columns[0]
-
-                    # Add a placeholder column for buttons (we render buttons separately in the loop)
                     rep_table["Action"] = "🔍 View"
 
-                    # Add a '🔍 View' action column for Harvester Summary
                     harv_table = harvester.copy()
-                    # Guarantee expected name
                     if "Harvester" not in harv_table.columns:
-                        # first column fallback
                         harv_first = harv_table.columns[0]
                         harv_table = harv_table.rename(columns={harv_first: "Harvester"})
                     harv_table["Action"] = "🔍 View"
@@ -187,27 +223,23 @@ with tabs[0]:
 
                     # ---- SALES REP SUMMARY with per-row 'View' buttons + modal ----
                     with t1:
-                        # We’ll show the table, then render buttons row-by-row underneath for click handling.
                         st.dataframe(_format_percent_columns(rep_table), use_container_width=True)
-
-                        # Buttons for each row (unique keys)
-                        st.markdown("**Click a row’s 🔍 View to open details:**")
+                        st.markdown("**Click a row’s button below to open details:**")
                         for i, row in rep_summary.reset_index(drop=True).iterrows():
                             rep_val = str(row[rep_name_col])
-                            # unique key per button
                             if st.button(f"🔍 View • {rep_val}", key=f"rep_view_{i}"):
-                                st.session_state["open_rep_modal"] = rep_val
+                                st.session_state["rep_modal"] = rep_val
 
-                        # Open modal if a rep was clicked
-                        if "open_rep_modal" in st.session_state:
-                            sel_rep = st.session_state["open_rep_modal"]
+                        # Open/close modal
+                        if st.session_state["rep_modal"] is not None:
+                            sel_rep = st.session_state["rep_modal"]
                             with st.modal(f"Sales Rep Details — {sel_rep}"):
                                 c1, c2, c3 = st.columns(3)
                                 f_sit  = c1.checkbox("Only Sits (Sales logic)", key=f"rep_only_sits_modal_{sel_rep}")
                                 f_sale = c2.checkbox("Only Sales", key=f"rep_only_sales_modal_{sel_rep}")
                                 f_ns   = c3.checkbox("Only No-Shows", key=f"rep_only_noshow_modal_{sel_rep}")
 
-                                mask = (df_display[cols_map["sales_rep"]].astype(str) == sel_rep)
+                                mask = (df_display[rep_name_col].astype(str) == sel_rep)
                                 if f_sit:
                                     mask &= df_display["is_sit_sales"]
                                 if f_sale:
@@ -218,7 +250,7 @@ with tabs[0]:
                                 st.dataframe(df_display.loc[mask, show_cols].reset_index(drop=True), use_container_width=True)
                                 st.caption("Close this popup to return to summaries.")
                                 if st.button("Close", key=f"close_rep_modal_{sel_rep}"):
-                                    del st.session_state["open_rep_modal"]
+                                    st.session_state["rep_modal"] = None
 
                     # ---- COMPANY TOTALS ----
                     with t2:
@@ -227,17 +259,16 @@ with tabs[0]:
                     # ---- HARVESTER SUMMARY with per-row 'View' buttons + modal ----
                     with t3:
                         st.dataframe(_format_percent_columns(harv_table), use_container_width=True)
-
-                        st.markdown("**Click a row’s 🔍 View to open details:**")
-                        # Standardize first column name to 'Harvester' (done above)
+                        st.markdown("**Click a row’s button below to open details:**")
+                        # Figure out harvester name column
+                        harv_name_col = "Harvester" if "Harvester" in harvester.columns else harvester.columns[0]
                         for i, row in harvester.reset_index(drop=True).iterrows():
-                            harv_val = str(row.get("Harvester", row.iloc[0]))
+                            harv_val = str(row[harv_name_col])
                             if st.button(f"🔍 View • {harv_val}", key=f"harv_view_{i}"):
-                                st.session_state["open_harv_modal"] = harv_val
+                                st.session_state["harv_modal"] = harv_val
 
-                        # Open modal if a harvester was clicked
-                        if "open_harv_modal" in st.session_state:
-                            sel_harv = st.session_state["open_harv_modal"]
+                        if st.session_state["harv_modal"] is not None:
+                            sel_harv = st.session_state["harv_modal"]
                             with st.modal(f"Harvester Details — {sel_harv}"):
                                 d1, d2 = st.columns(2)
                                 hf_sit  = d1.checkbox("Only Sits (Harvester logic)", key=f"harv_only_sits_modal_{sel_harv}")  # includes 'New Roof'
@@ -252,14 +283,11 @@ with tabs[0]:
                                 st.dataframe(df_display.loc[mask, show_cols].reset_index(drop=True), use_container_width=True)
                                 st.caption("Close this popup to return to summaries.")
                                 if st.button("Close", key=f"close_harv_modal_{sel_harv}"):
-                                    del st.session_state["open_harv_modal"]
+                                    st.session_state["harv_modal"] = None
 
                     # ---- HARVESTER PAY (plain table) ----
                     with t4:
                         st.dataframe(harvester_pay, use_container_width=True)
-
-                except Exception as e:
-                    st.error(f"Couldn't render on-page report: {e}")
 
             # -------- Diagnostics to troubleshoot mapping / statuses / currency --------
             with st.expander("🔎 Diagnostics (if numbers look wrong)"):
