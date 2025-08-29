@@ -1,0 +1,13 @@
+{
+  "columns": {
+    "job_name": "Name",
+    "date_created": "Date Created",
+    "start_date": "Start Date",
+    "status": "Status",
+    "sales_rep": "Sales Rep",
+    "total_contract": "Approved Estimates (Total)",
+    "appointment_set_by": "Appointment Set By",
+    "insulation": "Insulation",
+    "radiant_barrier": "Radiant Barrier"
+  }
+}
