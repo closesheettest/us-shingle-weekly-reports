@@ -8,15 +8,18 @@ import pandas as pd
 def load_config_from_path(config_path: Path):
     with open(config_path, "r") as f:
         cfg = json.load(f)
+    # Lowercase caches for status matching (case-insensitive)
     cfg["_sit_statuses_lc"] = [s.lower() for s in cfg.get("sit_statuses", [])]
     cfg["_sale_statuses_lc"] = [s.lower() for s in cfg.get("sale_statuses", [])]
     cfg["_no_show_statuses_lc"] = [s.lower() for s in cfg.get("no_show_statuses", [])]
+    # Truthy values for Insulation / Radiant Barrier: True/Yes/1
     cfg["_truthy_values"] = set(["true", "yes", "1"])
     return cfg
 
 
 # ---------- File reader ----------
 def read_input_file(uploaded_file) -> pd.DataFrame:
+    """Try CSV, then Excel (xlsx/xlsm via openpyxl, xls via xlrd, xlsb via pyxlsb)."""
     uploaded_file.seek(0)
     try:
         return pd.read_csv(uploaded_file)
@@ -54,10 +57,17 @@ def coerce_bool(series: pd.Series, truthy: set) -> pd.Series:
 
 
 def ensure_columns(df: pd.DataFrame, cfg):
+    """
+    Resolve required columns by matching names case-insensitively
+    and ignoring extra/nbsp spaces.
+    Returns a dict mapping logical keys -> actual df column names.
+    """
     def norm(s):
         return " ".join(str(s).replace("\u00A0", " ").strip().lower().split())
-    wanted = cfg["columns"]
+
+    wanted = cfg["columns"]  # e.g., {"total_contract": "Approved estimates (Total)", ...}
     norm_df = {norm(c): c for c in df.columns}
+
     resolved, missing = {}, []
     for key, wanted_name in wanted.items():
         n = norm(wanted_name)
@@ -65,6 +75,7 @@ def ensure_columns(df: pd.DataFrame, cfg):
             resolved[key] = norm_df[n]
         else:
             missing.append(wanted_name)
+
     if missing:
         raise KeyError(f"Missing required columns: {missing}. Found: {list(df.columns)}")
     return resolved
@@ -75,6 +86,7 @@ def safe_div(n, d):
 
 
 def to_currency_numeric(series: pd.Series) -> pd.Series:
+    """Clean currency-like strings: '$12,345.67' -> 12345.67"""
     return pd.to_numeric(
         series.astype(str).str.replace(r"[^0-9.\-]", "", regex=True),
         errors="coerce"
@@ -83,6 +95,13 @@ def to_currency_numeric(series: pd.Series) -> pd.Series:
 
 # ---------- Status tagging ----------
 def tag_statuses(df: pd.DataFrame, status_col: str, cfg) -> pd.DataFrame:
+    """
+    Create flags:
+      - is_sit_sales: uses normal Sit list (Settings)
+      - is_sit_harvester: same as Sales + treat 'New Roof' as a Sit
+      - is_sale: uses Sale list (Settings)
+      - is_no_show: uses No Show list (Settings)
+    """
     status_lc = df[status_col].astype(str).str.strip().str.lower()
     df = df.copy()
     # Sales rules
@@ -96,8 +115,15 @@ def tag_statuses(df: pd.DataFrame, status_col: str, cfg) -> pd.DataFrame:
 
 # ---------- Reports ----------
 def compute_sales_rep_summary(df: pd.DataFrame, cols, truthy: set) -> pd.DataFrame:
-    amt_col, ins_col, rb_col, rep_col = cols["total_contract"], cols["insulation"], cols["radiant_barrier"], cols["sales_rep"]
-    df_ins, df_rb = coerce_bool(df[ins_col], truthy), coerce_bool(df[rb_col], truthy)
+    amt_col, ins_col, rb_col, rep_col = (
+        cols["total_contract"],
+        cols["insulation"],
+        cols["radiant_barrier"],
+        cols["sales_rep"],
+    )
+
+    df_ins = coerce_bool(df[ins_col], truthy)
+    df_rb = coerce_bool(df[rb_col], truthy)
     grp = df.groupby(rep_col, dropna=False)
 
     def sales_amount_sum(g: pd.DataFrame) -> float:
@@ -105,16 +131,29 @@ def compute_sales_rep_summary(df: pd.DataFrame, cols, truthy: set) -> pd.DataFra
 
     summary = pd.DataFrame({
         "Total Appointments": grp.size(),
-        "Total Sits": grp["is_sit_sales"].sum(),
+        "Total Sits": grp["is_sit_sales"].sum(),  # sales sit logic
         "Total Sales": grp["is_sale"].sum(),
         "$ Sales Amount": grp.apply(sales_amount_sum),
     })
+
     summary["Sit %"] = (summary["Total Sits"] / summary["Total Appointments"]).fillna(0)
     summary["Sales %"] = (summary["Total Sales"] / summary["Total Sits"]).fillna(0)
     summary["No Show %"] = (grp["is_no_show"].sum() / summary["Total Appointments"]).fillna(0)
-    summary["Avg $ / Sale"] = summary.apply(lambda r: safe_div(r["$ Sales Amount"], r["Total Sales"]), axis=1)
-    summary["Insulation % (of Sales)"] = grp.apply(lambda g: (coerce_bool(g[ins_col], truthy) & g["is_sale"]).mean())
-    summary["Radiant Barrier % (of Sales)"] = grp.apply(lambda g: (coerce_bool(g[rb_col], truthy) & g["is_sale"]).mean())
+    summary["Avg $ / Sale"] = summary.apply(
+        lambda r: safe_div(r["$ Sales Amount"], r["Total Sales"]), axis=1
+    )
+
+    # Add-on % as "of Sales"
+    def pct_addon_of_sales(g: pd.DataFrame, addon_bool: pd.Series) -> float:
+        sold = g[g["is_sale"]]
+        if sold.empty:
+            return 0.0
+        addon_on_sold = addon_bool.loc[sold.index]
+        return float(addon_on_sold.sum()) / len(sold)
+
+    summary["Insulation % (of Sales)"] = grp.apply(lambda g: pct_addon_of_sales(g, df_ins))
+    summary["Radiant Barrier % (of Sales)"] = grp.apply(lambda g: pct_addon_of_sales(g, df_rb))
+
     return summary.reset_index(names=[rep_col])
 
 
@@ -122,8 +161,8 @@ def compute_company_totals(raw_df: pd.DataFrame, cols) -> pd.DataFrame:
     amt_col = cols["total_contract"]
     totals = {
         "Total Appointments": int(raw_df.shape[0]),
-        "Total Sits": int(raw_df["is_sit_sales"].sum()),
-        "Total Sales": int(raw_df["is_sale"].sum())
+        "Total Sits": int(raw_df["is_sit_sales"].sum()),  # sales sit logic
+        "Total Sales": int(raw_df["is_sale"].sum()),
     }
     totals["$ Sales Amount"] = float(to_currency_numeric(raw_df.loc[raw_df["is_sale"], amt_col]).sum())
     totals["Sit %"] = safe_div(totals["Total Sits"], totals["Total Appointments"])
@@ -134,12 +173,14 @@ def compute_company_totals(raw_df: pd.DataFrame, cols) -> pd.DataFrame:
 
 
 def compute_harvester_report(df: pd.DataFrame, cols) -> pd.DataFrame:
-    harvester = df[cols["appointment_set_by"]].fillna("").astype(str).str.strip().replace("", "Company")
-    df2 = df.copy(); df2["Harvester"] = harvester
+    harvester = df[cols["appointment_set_by"]].fillna("").astype(str).str.strip()
+    harvester = harvester.replace("", "Company")
+    df2 = df.copy()
+    df2["Harvester"] = harvester
     grp = df2.groupby("Harvester", dropna=False)
     harv = pd.DataFrame({
         "Appointments Set": grp.size(),
-        "Sits": grp["is_sit_harvester"].sum(),
+        "Sits": grp["is_sit_harvester"].sum(),  # harvester sit logic (includes 'New Roof')
     })
     harv["Sit %"] = (harv["Sits"] / harv["Appointments Set"]).fillna(0)
     return harv.reset_index()
@@ -148,14 +189,25 @@ def compute_harvester_report(df: pd.DataFrame, cols) -> pd.DataFrame:
 def compute_harvester_pay(harvester_report: pd.DataFrame) -> pd.DataFrame:
     def pay_for_sits(n):
         n = int(n or 0)
-        if n < 8: return 100 * n, 0, 100
-        elif n == 8: return 100 * 8 + 500, 500, 100
-        elif 9 <= n <= 14: return 125 * n + 500, 500, 125
-        else: return 150 * n + 500, 500, 150
+        if n < 8:
+            return 100 * n, 0, 100
+        elif n == 8:
+            return 100 * 8 + 500, 500, 100
+        elif 9 <= n <= 14:
+            return 125 * n + 500, 500, 125
+        else:
+            return 150 * n + 500, 500, 150
+
     rows = []
     for _, r in harvester_report.iterrows():
         pay, bonus, rate = pay_for_sits(r["Sits"])
-        rows.append({"Harvester": r["Harvester"], "Sits": int(r["Sits"]), "Base Rate Applied": rate, "Bonus (if any)": bonus, "Total Pay": pay})
+        rows.append({
+            "Harvester": r["Harvester"],
+            "Sits": int(r["Sits"]),
+            "Base Rate Applied": rate,
+            "Bonus (if any)": bonus,
+            "Total Pay": pay
+        })
     return pd.DataFrame(rows)
 
 
@@ -177,18 +229,47 @@ def build_workbook(df: pd.DataFrame, cfg: dict) -> bytes:
         harvester.to_excel(writer, sheet_name="Harvester Summary", index=False)
         harvester_pay.to_excel(writer, sheet_name="Harvester Pay", index=False)
 
+        # ---- Formatting: whole-number percentages & money ----
         workbook = writer.book
-        percent_fmt = workbook.add_format({"num_format": "0%"})
-        money_fmt = workbook.add_format({"num_format": "$#,##0"})
+        percent_fmt = workbook.add_format({"num_format": "0%"})      # no decimals
+        money_fmt = workbook.add_format({"num_format": "$#,##0"})    # whole dollars
         money2_fmt = workbook.add_format({"num_format": "$#,##0.00"})
 
-        for col, name in enumerate(rep_summary.columns):
-            if name.endswith("%"): writer.sheets["Sales Rep Summary"].set_column(col, col, 12, percent_fmt)
-        for col, name in enumerate(company.columns):
-            if name.endswith("%"): writer.sheets["Company Totals"].set_column(col, col, 12, percent_fmt)
+        # Sales Rep Summary
+        s1 = writer.sheets["Sales Rep Summary"]
+        for i, name in enumerate(rep_summary.columns):
+            if isinstance(name, str) and name.endswith("%"):
+                s1.set_column(i, i, 12, percent_fmt)
+        if "$ Sales Amount" in rep_summary.columns:
+            idx = list(rep_summary.columns).index("$ Sales Amount")
+            s1.set_column(idx, idx, 14, money_fmt)
+        if "Avg $ / Sale" in rep_summary.columns:
+            idx = list(rep_summary.columns).index("Avg $ / Sale")
+            s1.set_column(idx, idx, 14, money2_fmt)
+
+        # Company Totals
+        s2 = writer.sheets["Company Totals"]
+        for i, name in enumerate(company.columns):
+            if isinstance(name, str) and name.endswith("%"):
+                s2.set_column(i, i, 12, percent_fmt)
+        if "$ Sales Amount" in company.columns:
+            idx = list(company.columns).index("$ Sales Amount")
+            s2.set_column(idx, idx, 16, money_fmt)
+        if "Avg $ / Sale" in company.columns:
+            idx = list(company.columns).index("Avg $ / Sale")
+            s2.set_column(idx, idx, 16, money2_fmt)
+
+        # Harvester Summary
+        s3 = writer.sheets["Harvester Summary"]
         if "Sit %" in harvester.columns:
             idx = list(harvester.columns).index("Sit %")
-            writer.sheets["Harvester Summary"].set_column(idx, idx, 12, percent_fmt)
+            s3.set_column(idx, idx, 12, percent_fmt)
+
+        # Harvester Pay
+        s4 = writer.sheets["Harvester Pay"]
+        if "Total Pay" in harvester_pay.columns:
+            idx = list(harvester_pay.columns).index("Total Pay")
+            s4.set_column(idx, idx, 16, money_fmt)
 
     output_stream.seek(0)
     return output_stream.getvalue()
