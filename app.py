@@ -1,4 +1,6 @@
-# app.py — US Shingle Weekly Reports (Insulation / RB as attributes of sales, not extra sales)
+# app.py — US Shingle Weekly Reports
+# Status Rules editor (checkboxes), separate "Sit" for Harvester vs Sales,
+# Insulation/Radiant Barrier as attributes of sales (not extra sales)
 
 import json, re
 from io import BytesIO
@@ -30,56 +32,10 @@ hr.divider { border:none; border-top:1px solid rgba(120,120,120,.2); margin:14px
 
 # ---------- Paths ----------
 APP_DIR = Path(__file__).resolve().parent
-ALIASES_FILE = APP_DIR / "status_aliases.json"
+RULES_FILE = APP_DIR / "status_rules.json"       # new rules file (checkbox UI)
+OLD_ALIASES_FILE = APP_DIR / "status_aliases.json"  # legacy support (auto-imported once)
 
-# ---------- Base normalization ----------
-BASE_NORMALIZATION = {
-    "sit": "Sit", "sits": "Sit", "seated": "Sit",
-    "sold": "Sold", "sale": "Sold", "sold - finance": "Sold",
-    "closed": "Sold", "closed won": "Sold", "signed": "Sold",
-    "contract": "Sold", "contract signed": "Sold", "agreement signed": "Sold",
-    "install": "Sold", "installed": "Sold", "booked": "Sold", "signed contract": "Sold",
-    "no show": "No Show", "noshow": "No Show", "no-show": "No Show", "no show- h/o": "No Show",
-    "set": "Set", "appt set": "Set", "appointment set": "Set",
-    "cancel": "Cancel", "canceled": "Cancel", "cancelled": "Cancel",
-}
-DEFAULT_EXTRA_ALIASES = {
-    "Sit":  ["Sit - No Sale", "Sit - Pending", "Sit - Sold"],
-    "Sold": ["Signed Contract", "Sit - Sold"],
-    "No Show": ["No Show- H/O", "NS", "No-Show", "NoShow", "No Sit"],
-    "Set": [],
-}
-
-def load_aliases() -> dict:
-    try:
-        if ALIASES_FILE.exists():
-            data = json.loads(ALIASES_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and all(k in ["Sit","Sold","No Show","Set"] for k in data.keys()):
-                return data
-    except Exception:
-        pass
-    return DEFAULT_EXTRA_ALIASES.copy()
-
-def save_aliases(extra_aliases: dict):
-    try:
-        ALIASES_FILE.write_text(json.dumps(extra_aliases, indent=2), encoding="utf-8")
-        return True, f"Saved defaults to {ALIASES_FILE.name}"
-    except Exception as e:
-        return False, f"Could not save defaults: {e}"
-
-def normalize_factory(extra_aliases: dict):
-    norm = dict(BASE_NORMALIZATION)
-    for label, aliases in (extra_aliases or {}).items():
-        for a in aliases or []:
-            a = str(a).strip().lower()
-            if a: norm[a] = label
-    def _normalize_status(value):
-        if not isinstance(value, str): return "Unknown"
-        v = value.strip()
-        return norm.get(v.lower(), v)
-    return _normalize_status
-
-# ---------- Money / numeric helpers ----------
+# ---------- Numeric helpers ----------
 def _coerce_money(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.replace(r"[^\d\.\-\(\)]", "", regex=True)
     s = s.apply(lambda x: f"-{x[1:-1]}" if re.match(r"^\(.*\)$", x) else x)
@@ -97,6 +53,7 @@ def validate_numeric(df: pd.DataFrame) -> pd.DataFrame:
             df[num_col] = _coerce_number(df[num_col])
     return df
 
+# ---------- Name cleaning ----------
 BAD_EMPTY = {"", "nan", "none", "null", "tbd", "-", "--"}
 
 def clean_person(value: str) -> str:
@@ -121,7 +78,56 @@ def derive_closer_column(df: pd.DataFrame, sales_col="Sales Rep", setter_col="Ap
         closer.loc[mask_bad] = setters.loc[mask_bad]
     return closer.fillna("")
 
-# ---------- Overrides ----------
+# ---------- Status Rules (checkbox UI) ----------
+DEFAULT_RULES = {
+    "sit_harvester": [],   # statuses that count as a "Sit" in Harvester report
+    "sit_sales": [],       # statuses that count as a "Sit" in Sales report
+    "sale": [],            # statuses that count as "Sold"
+    "no_show": [],         # statuses that count as "No Show"
+}
+
+def _import_legacy_aliases_once() -> dict:
+    """If old status_aliases.json exists, import into new rules structure as a starting point."""
+    rules = dict(DEFAULT_RULES)
+    if not OLD_ALIASES_FILE.exists():
+        return rules
+    try:
+        aliases = json.loads(OLD_ALIASES_FILE.read_text(encoding="utf-8"))
+        # Treat legacy "Sit" as both sit_harvester and sit_sales, legacy "Sold" as sale, etc.
+        for s in aliases.get("Sit", []): rules["sit_harvester"].append(s); rules["sit_sales"].append(s)
+        for s in aliases.get("Sold", []): rules["sale"].append(s)
+        for s in aliases.get("No Show", []): rules["no_show"].append(s)
+    except Exception:
+        pass
+    # De-dup
+    for k in rules: rules[k] = sorted(list(set(rules[k])))
+    return rules
+
+def load_rules() -> dict:
+    if RULES_FILE.exists():
+        try:
+            data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and all(k in DEFAULT_RULES for k in data.keys()):
+                # normalize lists
+                for k in DEFAULT_RULES:
+                    if k not in data: data[k] = []
+                    if not isinstance(data[k], list): data[k] = []
+                return data
+        except Exception:
+            pass
+    # no rules file — seed from legacy aliases if present
+    return _import_legacy_aliases_once()
+
+def save_rules(rules: dict):
+    try:
+        # sort for stability
+        for k in rules:
+            rules[k] = sorted(list({str(v).strip() for v in rules[k] if str(v).strip()}))
+        RULES_FILE.write_text(json.dumps(rules, indent=2), encoding="utf-8")
+        return True, f"Saved status rules → {RULES_FILE.name}"
+    except Exception as e:
+        return False, f"Could not save rules: {e}"
+
 def apply_overrides(df: pd.DataFrame, overrides, id_col="Job Name") -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame) or df.empty or id_col not in df.columns or not overrides:
         return df
@@ -132,34 +138,44 @@ def apply_overrides(df: pd.DataFrame, overrides, id_col="Job Name") -> pd.DataFr
         mask = out[id_col].astype(str) == str(row_id)
         if not mask.any(): continue
         if payload.get("override_to_sit"):
-            out.loc[mask, "Status"] = "Sit"
             out.loc[mask, "Override To Sit"] = True
         note = payload.get("note")
         if isinstance(note, str) and note.strip():
             out.loc[mask, "Override Note"] = note.strip()
     return out
 
-# ---------- Flags (incl. Insulation/RB) ----------
-def build_flags(df: pd.DataFrame, *, infer_sale_from_amount: bool, count_sold_as_sit: bool) -> pd.DataFrame:
+def build_flags(df: pd.DataFrame, *, rules: dict,
+                infer_sale_from_amount: bool,
+                count_sold_as_sit_harv: bool,
+                count_sold_as_sit_sales: bool) -> pd.DataFrame:
     out = df.copy()
-    s = out["Status"].astype(str).str.strip().str.lower()
+    status_clean = out["Status"].astype(str).str.strip()
 
-    sit_like  = (s.str.startswith("sit") | s.str.contains(r"\bsit\b", regex=True) | s.isin({"sit"}))
-    sold_like = (s.isin({"sold","signed contract"}) | s.str.contains(r"\bsold\b", regex=True) | s.str.contains(r"signed\s*contract", regex=True))
-    noshow_like = s.str.contains("no show", regex=False)
+    sit_harv_set = set(rules.get("sit_harvester", []))
+    sit_sales_set = set(rules.get("sit_sales", []))
+    sale_set      = set(rules.get("sale", []))
+    noshow_set    = set(rules.get("no_show", []))
 
-    dollars_pos = pd.Series(False, index=out.index)
+    # Sale detection
+    is_sale_from_rule = status_clean.isin(sale_set)
+    is_sale_from_amt  = False
     if "Total Contract" in out.columns:
-        dollars_pos = pd.to_numeric(out["Total Contract"], errors="coerce").fillna(0) > 0
+        is_sale_from_amt = pd.to_numeric(out["Total Contract"], errors="coerce").fillna(0) > 0
+    out["is_sale"] = is_sale_from_rule | (infer_sale_from_amount & is_sale_from_amt)
 
-    out["is_sale"] = sold_like | (infer_sale_from_amount & dollars_pos)
-    out["is_sit"]  = sit_like | (count_sold_as_sit & out["is_sale"])
-    out["is_noshow"] = noshow_like
+    # Sits (separate for harvester vs sales)
+    out["is_sit_harv"]  = status_clean.isin(sit_harv_set)  | (count_sold_as_sit_harv  & out["is_sale"])
+    out["is_sit_sales"] = status_clean.isin(sit_sales_set) | (count_sold_as_sit_sales & out["is_sale"])
 
+    # No show (does not affect sales or sits unless you choose to)
+    out["is_noshow"] = status_clean.isin(noshow_set)
+
+    # Overrides enforce sit (both harvester & sales)
     if "Override To Sit" in out.columns:
-        out.loc[out["Override To Sit"].fillna(False).astype(bool), "is_sit"] = True
+        ov = out["Override To Sit"].fillna(False).astype(bool)
+        out.loc[ov, ["is_sit_harv","is_sit_sales"]] = True
 
-    # Insulation / RB flags (attributes of sold rows)
+    # Insulation / RB attributes (on sold rows; not extra sales)
     insul_cost = out.get("Insulation Cost", pd.Series(0, index=out.index))
     insul_sqft = out.get("Insulation Sqft", pd.Series(0, index=out.index))
     rb_cost    = out.get("Radiant Barrier Cost", pd.Series(0, index=out.index))
@@ -170,22 +186,20 @@ def build_flags(df: pd.DataFrame, *, infer_sale_from_amount: bool, count_sold_as
     has_rb_any    = (pd.to_numeric(rb_cost,  errors="coerce").fillna(0) > 0) | \
                     (pd.to_numeric(rb_sqft,  errors="coerce").fillna(0) > 0)
 
-    # These flags DO NOT change sales counts; they only mark which sales included add-ons
-    out["has_insul"]     = out["is_sale"] & has_insul_any
-    out["has_rb"]        = out["is_sale"] & has_rb_any
-    out["has_any_addon"] = out["is_sale"] & (has_insul_any | has_rb_any)  # count each sale once even if both
+    out["has_insul"]      = out["is_sale"] & has_insul_any
+    out["has_rb"]         = out["is_sale"] & has_rb_any
+    out["has_any_addon"]  = out["is_sale"] & (has_insul_any | has_rb_any)  # count sale once even if both
     return out
 
-# ---------- Totals & Reports ----------
 class Totals:
     def __init__(self, **kw): self.__dict__.update(kw)
 
 def compute_totals(flag_df: pd.DataFrame) -> Totals:
     total_appts = int(len(flag_df))
-    total_sits  = int(flag_df["is_sit"].sum())
+    sits_harv   = int(flag_df["is_sit_harv"].sum())
+    sits_sales  = int(flag_df["is_sit_sales"].sum())
     total_sales = int(flag_df["is_sale"].sum())
     total_noshow = int(flag_df["is_noshow"].sum())
-
     sales_amt = float(flag_df.loc[flag_df["is_sale"], "Total Contract"].sum()) if "Total Contract" in flag_df.columns else 0.0
 
     # Add-on attributes (do NOT change sales count)
@@ -198,10 +212,11 @@ def compute_totals(flag_df: pd.DataFrame) -> Totals:
     rb_cost_sum    = float(flag_df.loc[flag_df["has_rb"], "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in flag_df.columns else 0.0
     rb_sqft_sum    = float(flag_df.loc[flag_df["has_rb"], "Radiant Barrier Sqft"].sum()) if "Radiant Barrier Sqft" in flag_df.columns else 0.0
 
-    sit_rate_appt   = (total_sits / total_appts) if total_appts else 0.0
-    close_rate      = (total_sales / total_sits) if total_sits else 0.0
-    sales_rate_appt = (total_sales / total_appts) if total_appts else 0.0
-    avg_sale        = (sales_amt / total_sales) if total_sales else 0.0
+    sit_rate_harv  = (sits_harv / total_appts) if total_appts else 0.0
+    sit_rate_sales = (sits_sales / total_appts) if total_appts else 0.0
+    close_rate     = (total_sales / sits_sales) if sits_sales else 0.0
+    sales_rate_appt= (total_sales / total_appts) if total_appts else 0.0
+    avg_sale       = (sales_amt / total_sales) if total_sales else 0.0
 
     insul_pct = (sales_with_insul / total_sales) if total_sales else 0.0
     rb_pct    = (sales_with_rb    / total_sales) if total_sales else 0.0
@@ -209,18 +224,13 @@ def compute_totals(flag_df: pd.DataFrame) -> Totals:
 
     return Totals(
         total_appointments=total_appts,
-        total_sits=total_sits,
-        total_sales=total_sales,
-        total_no_shows=total_noshow,
+        sits_harv=sits_harv, sits_sales=sits_sales,
+        total_sales=total_sales, total_no_shows=total_noshow,
         total_contract_amount=round(sales_amt, 2),
-        sit_rate_appt=sit_rate_appt,
-        close_rate=close_rate,
-        sales_rate_appt=sales_rate_appt,
-        avg_sale=round(avg_sale, 2),
-
+        sit_rate_harv=sit_rate_harv, sit_rate_sales=sit_rate_sales,
+        close_rate=close_rate, sales_rate_appt=sales_rate_appt, avg_sale=round(avg_sale, 2),
         sales_with_insul=sales_with_insul, sales_with_rb=sales_with_rb, sales_with_addon=sales_with_addon,
-        insul_cost_sum=insul_cost_sum, insul_sqft_sum=insul_sqft_sum,
-        rb_cost_sum=rb_cost_sum, rb_sqft_sum=rb_sqft_sum,
+        insul_cost_sum=insul_cost_sum, insul_sqft_sum=insul_sqft_sum, rb_cost_sum=rb_cost_sum, rb_sqft_sum=rb_sqft_sum,
         insul_pct=insul_pct, rb_pct=rb_pct, addon_pct=addon_pct,
     )
 
@@ -228,7 +238,7 @@ def compute_harvester_report(flag_df: pd.DataFrame, setter_col="Appointment Set 
     df = flag_df.copy()
     if setter_col not in df.columns: df[setter_col] = ""
     rep = df.groupby(setter_col, dropna=False).apply(
-        lambda g: pd.Series({"Appointments Set": len(g), "Sits": int(g["is_sit"].sum())})
+        lambda g: pd.Series({"Appointments Set": len(g), "Sits": int(g["is_sit_harv"].sum())})
     ).reset_index().rename(columns={setter_col: "Harvester"})
     rep["Sit %"] = (rep["Sits"] / rep["Appointments Set"]).fillna(0.0)
     return rep
@@ -238,7 +248,7 @@ def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame
     if closer_col not in df.columns: df[closer_col] = ""
     def row(g: pd.DataFrame):
         appts = len(g)
-        sits  = int(g["is_sit"].sum())
+        sits  = int(g["is_sit_sales"].sum())
         sales = int(g["is_sale"].sum())
         sales_amt = float(g.loc[g["is_sale"], "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
 
@@ -260,7 +270,6 @@ def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame
             "Sales $": sales_amt,
             "Avg Sale $": (sales_amt / sales) if sales else 0.0,
 
-            # Add-ons: attributes of the sales, not extra sales
             "Sales with Insulation #": sales_with_insul,
             "Insul % of Sales": (sales_with_insul / sales) if sales else 0.0,
             "Insul $": insul_cost_sum,
@@ -282,8 +291,8 @@ def company_totals_row(flag_df: pd.DataFrame):
     sales_row = {
         "Sales Rep": "TOTAL",
         "Appointments": t.total_appointments,
-        "Sits": t.total_sits,
-        "Sit %": t.sit_rate_appt,
+        "Sits": t.sits_sales,
+        "Sit %": t.sit_rate_sales,
         "Sales": t.total_sales,
         "Close %": t.close_rate,
         "Sales $": t.total_contract_amount,
@@ -305,8 +314,8 @@ def company_totals_row(flag_df: pd.DataFrame):
     harv_row = {
         "Harvester": "TOTAL",
         "Appointments Set": t.total_appointments,
-        "Sits": t.total_sits,
-        "Sit %": t.sit_rate_appt,
+        "Sits": t.sits_harv,
+        "Sit %": t.sit_rate_harv,
     }
     return harv_row, sales_row
 
@@ -325,7 +334,8 @@ def pct_to_int(df: pd.DataFrame, cols) -> pd.DataFrame:
     return out
 
 def filter_detail(df: pd.DataFrame, mode: str) -> pd.DataFrame:
-    if mode == "Only Sits": return df[df["is_sit"]]
+    if mode == "Only Sits (Harvester)": return df[df["is_sit_harv"]]
+    if mode == "Only Sits (Sales)": return df[df["is_sit_sales"]]
     if mode == "Only Sales": return df[df["is_sale"]]
     if mode == "Only No Shows": return df[df["is_noshow"]]
     return df
@@ -375,7 +385,6 @@ rep_col    = sb_select_required("Sales Rep column",      ["Sales Rep","Rep","Clo
 harv_col   = sb_select_required("Appointment Set By column", ["Appointment Set By","Setter","Set By","Harvester","Created By"])
 amt_col    = sb_select_required("Total Contract $ column",   ["Total Contract","Approved Estimates (Total)","Sale Amount","Contract Total","Amount"])
 
-# NEW optional columns
 insul_cost_col = sb_select_optional("Insulation Cost (optional)", ["Insulation Cost","Insualtion Cost","Insulation $","Insulation Amount"])
 insul_sqft_col = sb_select_optional("Insulation Sqft (optional)", ["Insulation Sqft","Insualtion Sqft","Insulation SF","Insulation Square Feet"])
 rb_cost_col    = sb_select_optional("Radiant Barrier Cost (optional)", ["Radiant Barrier Cost","RB Cost","Radiant Barrier $","Radiant Barrier Amount"])
@@ -403,112 +412,220 @@ for missing, default in [
 
 raw_df = validate_numeric(raw_df)
 
-# Status Aliases
-st.sidebar.subheader("Status Aliases (optional, one-time)")
-loaded_aliases = load_aliases()
-sit_aliases_text    = st.sidebar.text_input("Aliases → Sit",     value=", ".join(loaded_aliases.get("Sit", [])))
-sold_aliases_text   = st.sidebar.text_input("Aliases → Sold",    value=", ".join(loaded_aliases.get("Sold", [])))
-noshow_aliases_text = st.sidebar.text_input("Aliases → No Show", value=", ".join(loaded_aliases.get("No Show", [])))
-set_aliases_text    = st.sidebar.text_input("Aliases → Set",     value=", ".join(loaded_aliases.get("Set", [])))
+# ---------- Status Rules Editor ----------
+st.sidebar.subheader("Status Rules (one-time)")
+rules = load_rules()
 
-extra_aliases = {
-    "Sit":     [s.strip() for s in sit_aliases_text.split(",") if s.strip()],
-    "Sold":    [s.strip() for s in sold_aliases_text.split(",") if s.strip()],
-    "No Show": [s.strip() for s in noshow_aliases_text.split(",") if s.strip()],
-    "Set":     [s.strip() for s in set_aliases_text.split(",") if s.strip()],
-}
-c1, c2, c3 = st.sidebar.columns(3)
-with c1:
-    if st.button("Save defaults"):
-        ok, msg = save_aliases(extra_aliases)
-        (st.success if ok else st.error)(msg)
-with c2:
-    st.download_button("Download", data=json.dumps(extra_aliases, indent=2),
-                       file_name="status_aliases.json", mime="application/json")
-with c3:
-    up = st.file_uploader("Upload", type=["json"], label_visibility="collapsed")
-    if up is not None:
-        try:
-            incoming = json.load(up)
-            if all(k in incoming for k in ["Sit","Sold","No Show","Set"]):
-                ok, msg = save_aliases(incoming)
-                (st.success if ok else st.error)(msg)
-                safe_rerun()
-            else:
-                st.error("Invalid mapping file (missing keys).")
-        except Exception as e:
-            st.error(f"Invalid JSON: {e}")
+# Build a table of all unique statuses (union of file + rules)
+unique_statuses = sorted(set([str(s).strip() for s in raw_df["Status"].dropna().astype(str)]).union(
+    set(rules.get("sit_harvester", [])) | set(rules.get("sit_sales", [])) |
+    set(rules.get("sale", [])) | set(rules.get("no_show", []))
+))
 
-_normalize_status = normalize_factory(extra_aliases)
-raw_df["Status"] = raw_df["Status"].apply(_normalize_status)
+rules_df = pd.DataFrame({
+    "Status": unique_statuses,
+    "Sit (Harvester)": [s in rules.get("sit_harvester", []) for s in unique_statuses],
+    "Sit (Sales)":     [s in rules.get("sit_sales", []) for s in unique_statuses],
+    "Sale":            [s in rules.get("sale", []) for s in unique_statuses],
+    "No Show":         [s in rules.get("no_show", []) for s in unique_statuses],
+})
 
-# Closer derive
+with st.sidebar.expander("Click to review & edit status rules", expanded=True):
+    st.caption("Check the boxes for how each Status should be treated. Save once and it'll persist.")
+    edited = st.data_editor(
+        rules_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "Sit (Harvester)": st.column_config.CheckboxColumn(),
+            "Sit (Sales)":     st.column_config.CheckboxColumn(),
+            "Sale":            st.column_config.CheckboxColumn(),
+            "No Show":         st.column_config.CheckboxColumn(),
+        }
+    )
+
+    colx, coly, colz = st.columns(3)
+    with colx:
+        if st.button("Save rules"):
+            new_rules = {
+                "sit_harvester": edited.loc[edited["Sit (Harvester)"], "Status"].astype(str).str.strip().tolist(),
+                "sit_sales":     edited.loc[edited["Sit (Sales)"],     "Status"].astype(str).str.strip().tolist(),
+                "sale":          edited.loc[edited["Sale"],            "Status"].astype(str).str.strip().tolist(),
+                "no_show":       edited.loc[edited["No Show"],         "Status"].astype(str).str.strip().tolist(),
+            }
+            ok, msg = save_rules(new_rules)
+            (st.success if ok else st.error)(msg)
+            if ok: safe_rerun()
+    with coly:
+        st.download_button("Download rules.json", data=json.dumps(rules, indent=2),
+                           file_name="status_rules.json", mime="application/json")
+    with colz:
+        up_rules = st.file_uploader("Upload rules.json", type=["json"], label_visibility="collapsed")
+        if up_rules is not None:
+            try:
+                new = json.load(up_rules)
+                if all(k in DEFAULT_RULES for k in new.keys()):
+                    ok, msg = save_rules(new)
+                    (st.success if ok else st.error)(msg)
+                    if ok: safe_rerun()
+                else:
+                    st.error("Invalid rules file (missing required keys).")
+            except Exception as e:
+                st.error(f"Invalid JSON: {e}")
+
+# Warn about any statuses that are still completely unclassified
+unclassified = edited.loc[
+    ~(edited["Sit (Harvester)"] | edited["Sit (Sales)"] | edited["Sale"] | edited["No Show"]),
+    "Status"
+].tolist()
+if unclassified:
+    st.warning(f"Unclassified statuses detected ({len(unclassified)}): {', '.join(unclassified)}. "
+               "Classify and click 'Save rules' so reports are accurate.")
+
+# ---------- Closer derive & ignore reps ----------
 st.sidebar.subheader("Closer Name Settings")
 normalize_names = st.sidebar.checkbox("Normalize names (Title Case / 'Last, First'→'First Last')", value=True)
 setter_fallback = st.sidebar.checkbox("Use Appointment Set By when Sales Rep blank/TBD", value=True)
 raw_df["Closer (derived)"] = derive_closer_column(raw_df, "Sales Rep", "Appointment Set By",
                                                   normalize_names=normalize_names, setter_fallback=setter_fallback)
 
-# Ignore Sales Reps
 st.sidebar.subheader("Ignore Sales Reps")
 closer_options = safe_unique_sorted(raw_df["Closer (derived)"], exclude=(""," "))
 ignored_closers = st.sidebar.multiselect("Exclude these closers from all reports", options=closer_options, default=[])
 work_df = raw_df[~raw_df["Closer (derived)"].astype(str).isin(set(ignored_closers))].copy()
 
-# Sales logic
+# ---------- Sales logic ----------
 st.sidebar.subheader("Sales Counting Options")
 infer_from_amount = st.sidebar.checkbox("Infer Sold if $ > 0", value=True)
-count_sold_as_sit = st.sidebar.checkbox("Count Sold rows as Sits", value=True)
+count_sold_as_sit_harv  = st.sidebar.checkbox("Count Sold rows as Sits (Harvester)", value=True)
+count_sold_as_sit_sales = st.sidebar.checkbox("Count Sold rows as Sits (Sales)", value=True)
 
-# Initial flags
-flag_df = build_flags(work_df, infer_sale_from_amount=infer_from_amount, count_sold_as_sit=count_sold_as_sit)
-
-# Overrides
-ROW_ID_COL = "Job Name"
+# ---------- Initial flags ----------
 if "overrides" not in st.session_state: st.session_state.overrides = {}
-st.sidebar.header("Overrides")
-row_ids = safe_unique_sorted(work_df["Job Name"], exclude=("",))
-if row_ids:
-    sel = st.sidebar.selectbox("Select a record", options=row_ids, key="override_select")
-    cur = st.session_state.overrides.get(sel, {"override_to_sit": False, "note": ""})
-    ov_sit = st.sidebar.checkbox("Override this record to a SIT", value=cur.get("override_to_sit", False))
-    note = st.sidebar.text_area("Note (why?)", value=cur.get("note", ""), height=80)
-    a,b = st.sidebar.columns(2)
-    with a:
-        if st.button("Save Override"):
-            st.session_state.overrides[sel] = {"override_to_sit": ov_sit, "note": note}
-            safe_rerun()
-    with b:
-        if st.button("Clear Override"):
-            if sel in st.session_state.overrides: del st.session_state.overrides[sel]
-            safe_rerun()
+work_df = apply_overrides(work_df, st.session_state.overrides, id_col="Job Name")
 
-# Re-apply overrides & flags
-flag_df = apply_overrides(flag_df, st.session_state.overrides, id_col=ROW_ID_COL)
-flag_df = build_flags(flag_df, infer_sale_from_amount=infer_from_amount, count_sold_as_sit=count_sold_as_sit)
+flag_df = build_flags(
+    work_df,
+    rules=load_rules(),  # reload in case just saved
+    infer_sale_from_amount=infer_from_amount,
+    count_sold_as_sit_harv=count_sold_as_sit_harv,
+    count_sold_as_sit_sales=count_sold_as_sit_sales
+)
 
-# Compute totals & reports
+# ---------- Totals & reports ----------
 totals = compute_totals(flag_df)
+
+def compute_harvester_report(flag_df: pd.DataFrame, setter_col="Appointment Set By") -> pd.DataFrame:
+    df = flag_df.copy()
+    if setter_col not in df.columns: df[setter_col] = ""
+    rep = df.groupby(setter_col, dropna=False).apply(
+        lambda g: pd.Series({"Appointments Set": len(g), "Sits": int(g["is_sit_harv"].sum())})
+    ).reset_index().rename(columns={setter_col: "Harvester"})
+    rep["Sit %"] = (rep["Sits"] / rep["Appointments Set"]).fillna(0.0)
+    return rep
+
+def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame:
+    df = flag_df.copy()
+    if closer_col not in df.columns: df[closer_col] = ""
+    def row(g: pd.DataFrame):
+        appts = len(g)
+        sits  = int(g["is_sit_sales"].sum())
+        sales = int(g["is_sale"].sum())
+        sales_amt = float(g.loc[g["is_sale"], "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
+
+        sales_with_insul = int(g["has_insul"].sum())
+        sales_with_rb    = int(g["has_rb"].sum())
+        sales_with_addon = int(g["has_any_addon"].sum())
+
+        insul_cost_sum = float(g.loc[g["has_insul"], "Insulation Cost"].sum()) if "Insulation Cost" in g.columns else 0.0
+        insul_sqft_sum = float(g.loc[g["has_insul"], "Insulation Sqft"].sum()) if "Insulation Sqft" in g.columns else 0.0
+        rb_cost_sum    = float(g.loc[g["has_rb"], "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in g.columns else 0.0
+        rb_sqft_sum    = float(g.loc[g["has_rb"], "Radiant Barrier Sqft"].sum()) if "Radiant Barrier Sqft" in g.columns else 0.0
+
+        return pd.Series({
+            "Appointments": appts,
+            "Sits": sits,
+            "Sit %": (sits / appts) if appts else 0.0,
+            "Sales": sales,
+            "Close %": (sales / sits) if sits else 0.0,
+            "Sales $": sales_amt,
+            "Avg Sale $": (sales_amt / sales) if sales else 0.0,
+
+            "Sales with Insulation #": sales_with_insul,
+            "Insul % of Sales": (sales_with_insul / sales) if sales else 0.0,
+            "Insul $": insul_cost_sum,
+            "Insul Sqft": insul_sqft_sum,
+
+            "Sales with RB #": sales_with_rb,
+            "RB % of Sales": (sales_with_rb / sales) if sales else 0.0,
+            "RB $": rb_cost_sum,
+            "RB Sqft": rb_sqft_sum,
+
+            "Sales with Add-on #": sales_with_addon,
+            "Add-on % of Sales": (sales_with_addon / sales) if sales else 0.0,
+        })
+    rep = df.groupby(closer_col, dropna=False).apply(row).reset_index().rename(columns={closer_col: "Sales Rep"})
+    return rep
+
 harvester_report = compute_harvester_report(flag_df, setter_col="Appointment Set By")
 sales_report     = compute_sales_report(flag_df, closer_col="Closer (derived)")
 
-# Append TOTAL rows
+def company_totals_row(flag_df: pd.DataFrame):
+    t = compute_totals(flag_df)
+    sales_row = {
+        "Sales Rep": "TOTAL",
+        "Appointments": t.total_appointments,
+        "Sits": t.sits_sales,
+        "Sit %": t.sit_rate_sales,
+        "Sales": t.total_sales,
+        "Close %": t.close_rate,
+        "Sales $": t.total_contract_amount,
+        "Avg Sale $": t.avg_sale,
+
+        "Sales with Insulation #": t.sales_with_insul,
+        "Insul % of Sales": t.insul_pct,
+        "Insul $": t.insul_cost_sum,
+        "Insul Sqft": t.insul_sqft_sum,
+
+        "Sales with RB #": t.sales_with_rb,
+        "RB % of Sales": t.rb_pct,
+        "RB $": t.rb_cost_sum,
+        "RB Sqft": t.rb_sqft_sum,
+
+        "Sales with Add-on #": t.sales_with_addon,
+        "Add-on % of Sales": t.addon_pct,
+    }
+    harv_row = {
+        "Harvester": "TOTAL",
+        "Appointments Set": t.total_appointments,
+        "Sits": t.sits_harv,
+        "Sit %": t.sit_rate_harv,
+    }
+    return harv_row, sales_row
+
 harv_total_row, sales_total_row = company_totals_row(flag_df)
 harvester_with_total = pd.concat([harvester_report, pd.DataFrame([harv_total_row])], ignore_index=True)
 sales_with_total     = pd.concat([sales_report,     pd.DataFrame([sales_total_row])], ignore_index=True)
 
 # Percent display (whole numbers)
+def pct_to_int(df: pd.DataFrame, cols) -> pd.DataFrame:
+    out = df.copy()
+    for c in cols:
+        if c in out.columns:
+            out[c] = (out[c] * 100).round(0).astype("Int64")
+    return out
+
 harv_display  = pct_to_int(harvester_with_total, ["Sit %"])
-sales_display = pct_to_int(
-    sales_with_total,
-    ["Sit %","Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"]
-)
+sales_display = pct_to_int(sales_with_total, ["Sit %","Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"])
 
 # Company Total (single-row)
 company_total_table = pd.DataFrame([{
     "Appointments": totals.total_appointments,
-    "Sits": totals.total_sits,
-    "Sit %": int(round(totals.sit_rate_appt * 100, 0)),
+    "Sits (Harvester)": totals.sits_harv,
+    "Sit % (Harvester)": int(round(totals.sit_rate_harv * 100, 0)),
+    "Sits (Sales)": totals.sits_sales,
+    "Sit % (Sales)": int(round(totals.sit_rate_sales * 100, 0)),
     "Sales": totals.total_sales,
     "Close %": int(round(totals.close_rate * 100, 0)),
     "Sales $": totals.total_contract_amount,
@@ -528,18 +645,11 @@ company_total_table = pd.DataFrame([{
     "Add-on % of Sales": int(round(totals.addon_pct * 100, 0)),
 }])
 
-# Detail view
-DETAIL_COLS = [
-    "City","Job Name","Start Date","Status","Sales Rep","Closer (derived)","Appointment Set By",
-    "Total Contract","Insulation Cost","Insulation Sqft","Radiant Barrier Cost","Radiant Barrier Sqft",
-    "is_sit","is_sale","is_noshow","has_insul","has_rb","has_any_addon"
-]
-detail_display = flag_df.copy()
-for col in ["is_sit","is_sale","is_noshow","has_insul","has_rb","has_any_addon"]:
-    if col in detail_display.columns:
-        detail_display[col] = detail_display[col].astype(bool)
+# ---------- Derive Closer (after ignore selection) ----------
+raw_df["Closer (derived)"] = derive_closer_column(raw_df, "Sales Rep", "Appointment Set By",
+                                                  normalize_names=normalize_names, setter_fallback=setter_fallback)
 
-# ---------- Header & KPI cards ----------
+# ---------- UI Header & KPIs ----------
 st.title("US Shingle Weekly Reports")
 st.caption("Tip: ⌘/Ctrl + B toggles the sidebar.")
 if ignored_closers:
@@ -548,8 +658,8 @@ if ignored_closers:
 st.markdown('<div class="kpi-row">', unsafe_allow_html=True)
 kpis = [
     ("Appointments", f"{totals.total_appointments:,}"),
-    ("Sits", f"{totals.total_sits:,}"),
-    ("Sit %", f"{totals.sit_rate_appt:.0%}"),
+    ("Sits (Harvester)", f"{totals.sits_harv:,}"),
+    ("Sit % (Harvester)", f"{totals.sit_rate_harv:.0%}"),
     ("Sales", f"{totals.total_sales:,}"),
     ("Close %", f"{totals.close_rate:.0%}"),
     ("Sales $", f"${totals.total_contract_amount:,.0f}"),
@@ -565,19 +675,31 @@ tab_overview, tab_setters, tab_closers, tab_detail, tab_audit, tab_exports = st.
     ["📊 Overview", "🌱 Setters (Harvester)", "💼 Closers (Sales)", "🧾 Detail", "📝 Audit", "⬇️ Export"]
 )
 
+# Detail display with flags
+DETAIL_COLS = [
+    "City","Job Name","Start Date","Status","Sales Rep","Closer (derived)","Appointment Set By",
+    "Total Contract","Insulation Cost","Insulation Sqft","Radiant Barrier Cost","Radiant Barrier Sqft",
+    "is_sit_harv","is_sit_sales","is_sale","is_noshow","has_insul","has_rb","has_any_addon"
+]
+detail_display = flag_df.copy()
+for col in ["is_sit_harv","is_sit_sales","is_sale","is_noshow","has_insul","has_rb","has_any_addon"]:
+    if col in detail_display.columns:
+        detail_display[col] = detail_display[col].astype(bool)
+
 with tab_overview:
     st.subheader("🏢 Company Total (All)")
     st.dataframe(
         company_total_table,
         use_container_width=True, hide_index=True,
         column_config={
-            "Sit %":   st.column_config.NumberColumn(format="%d%%"),
-            "Close %": st.column_config.NumberColumn(format="%d%%"),
-            "Sales $": st.column_config.NumberColumn(format="$%.0f"),
-            "Avg Sale $": st.column_config.NumberColumn(format="$%.0f"),
-            "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
-            "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
-            "Add-on % of Sales":st.column_config.NumberColumn(format="%d%%"),
+            "Sit % (Harvester)": st.column_config.NumberColumn(format="%d%%"),
+            "Sit % (Sales)":     st.column_config.NumberColumn(format="%d%%"),
+            "Close %":           st.column_config.NumberColumn(format="%d%%"),
+            "Sales $":           st.column_config.NumberColumn(format="$%.0f"),
+            "Avg Sale $":        st.column_config.NumberColumn(format="$%.0f"),
+            "Insul % of Sales":  st.column_config.NumberColumn(format="%d%%"),
+            "RB % of Sales":     st.column_config.NumberColumn(format="%d%%"),
+            "Add-on % of Sales": st.column_config.NumberColumn(format="%d%%"),
             "Insul $": st.column_config.NumberColumn(format="$%.0f"),
             "RB $":    st.column_config.NumberColumn(format="$%.0f"),
         }
@@ -609,7 +731,8 @@ with tab_overview:
         )
 
     st.subheader("Company Raw Line Items")
-    mode = st.radio("Filter:", ["All", "Only Sits", "Only Sales", "Only No Shows"], horizontal=True, key="company_mode")
+    mode = st.radio("Filter:", ["All", "Only Sits (Harvester)", "Only Sits (Sales)", "Only Sales", "Only No Shows"],
+                    horizontal=True, key="company_mode")
     comp_detail = filter_detail(detail_display, mode)
     st.dataframe(comp_detail[[c for c in DETAIL_COLS if c in comp_detail.columns]], use_container_width=True, hide_index=True)
     st.download_button("Download Company Raw CSV", data=comp_detail.to_csv(index=False).encode("utf-8"),
@@ -624,7 +747,8 @@ with tab_setters:
     harv_list = safe_unique_sorted(harvester_report["Harvester"])
     if harv_list:
         sel_h = st.selectbox("Choose Harvester", options=harv_list, key="harv_choice")
-        mode_h = st.radio("Filter:", ["All", "Only Sits", "Only Sales", "Only No Shows"], horizontal=True, key="harv_mode")
+        mode_h = st.radio("Filter:", ["All", "Only Sits (Harvester)", "Only Sales", "Only No Shows"],
+                          horizontal=True, key="harv_mode")
         h_detail = detail_display[ detail_display["Appointment Set By"].astype(str).str.strip() == sel_h ].copy()
         h_detail = filter_detail(h_detail, mode_h)
         st.dataframe(h_detail[[c for c in DETAIL_COLS if c in h_detail.columns]], use_container_width=True, hide_index=True)
@@ -655,7 +779,8 @@ with tab_closers:
     rep_list = safe_unique_sorted(sales_report["Sales Rep"])
     if rep_list:
         sel_r = st.selectbox("Choose Sales Rep", options=rep_list, key="rep_choice")
-        mode_r = st.radio("Filter:", ["All", "Only Sits", "Only Sales", "Only No Shows"], horizontal=True, key="rep_mode")
+        mode_r = st.radio("Filter:", ["All", "Only Sits (Sales)", "Only Sales", "Only No Shows"],
+                          horizontal=True, key="rep_mode")
         r_detail = detail_display[ detail_display["Closer (derived)"].astype(str).str.strip() == sel_r ].copy()
         r_detail = filter_detail(r_detail, mode_r)
         st.dataframe(r_detail[[c for c in DETAIL_COLS if c in r_detail.columns]], use_container_width=True, hide_index=True)
