@@ -1,4 +1,4 @@
-# app.py — US Shingle Weekly Reports (with Insulation / Radiant Barrier analytics)
+# app.py — US Shingle Weekly Reports (Insulation / RB as attributes of sales, not extra sales)
 
 import json, re
 from io import BytesIO
@@ -159,7 +159,7 @@ def build_flags(df: pd.DataFrame, *, infer_sale_from_amount: bool, count_sold_as
     if "Override To Sit" in out.columns:
         out.loc[out["Override To Sit"].fillna(False).astype(bool), "is_sit"] = True
 
-    # Insulation / RB flags (count only on sold rows)
+    # Insulation / RB flags (attributes of sold rows)
     insul_cost = out.get("Insulation Cost", pd.Series(0, index=out.index))
     insul_sqft = out.get("Insulation Sqft", pd.Series(0, index=out.index))
     rb_cost    = out.get("Radiant Barrier Cost", pd.Series(0, index=out.index))
@@ -167,12 +167,13 @@ def build_flags(df: pd.DataFrame, *, infer_sale_from_amount: bool, count_sold_as
 
     has_insul_any = (pd.to_numeric(insul_cost, errors="coerce").fillna(0) > 0) | \
                     (pd.to_numeric(insul_sqft, errors="coerce").fillna(0) > 0)
-    has_rb_any    = (pd.to_numeric(rb_cost, errors="coerce").fillna(0) > 0)   | \
-                    (pd.to_numeric(rb_sqft, errors="coerce").fillna(0) > 0)
+    has_rb_any    = (pd.to_numeric(rb_cost,  errors="coerce").fillna(0) > 0) | \
+                    (pd.to_numeric(rb_sqft,  errors="coerce").fillna(0) > 0)
 
-    out["has_insul"] = out["is_sale"] & has_insul_any
-    out["has_rb"]    = out["is_sale"] & has_rb_any
-    out["has_any_addon"] = out["is_sale"] & (has_insul_any | has_rb_any)  # counts a sale once even if both
+    # These flags DO NOT change sales counts; they only mark which sales included add-ons
+    out["has_insul"]     = out["is_sale"] & has_insul_any
+    out["has_rb"]        = out["is_sale"] & has_rb_any
+    out["has_any_addon"] = out["is_sale"] & (has_insul_any | has_rb_any)  # count each sale once even if both
     return out
 
 # ---------- Totals & Reports ----------
@@ -187,10 +188,10 @@ def compute_totals(flag_df: pd.DataFrame) -> Totals:
 
     sales_amt = float(flag_df.loc[flag_df["is_sale"], "Total Contract"].sum()) if "Total Contract" in flag_df.columns else 0.0
 
-    # Insulation / RB sums on sold rows
-    insul_sales = int(flag_df["has_insul"].sum())
-    rb_sales    = int(flag_df["has_rb"].sum())
-    addon_sales = int(flag_df["has_any_addon"].sum())
+    # Add-on attributes (do NOT change sales count)
+    sales_with_insul = int(flag_df["has_insul"].sum())
+    sales_with_rb    = int(flag_df["has_rb"].sum())
+    sales_with_addon = int(flag_df["has_any_addon"].sum())
 
     insul_cost_sum = float(flag_df.loc[flag_df["has_insul"], "Insulation Cost"].sum()) if "Insulation Cost" in flag_df.columns else 0.0
     insul_sqft_sum = float(flag_df.loc[flag_df["has_insul"], "Insulation Sqft"].sum()) if "Insulation Sqft" in flag_df.columns else 0.0
@@ -202,9 +203,9 @@ def compute_totals(flag_df: pd.DataFrame) -> Totals:
     sales_rate_appt = (total_sales / total_appts) if total_appts else 0.0
     avg_sale        = (sales_amt / total_sales) if total_sales else 0.0
 
-    insul_pct = (insul_sales / total_sales) if total_sales else 0.0
-    rb_pct    = (rb_sales / total_sales) if total_sales else 0.0
-    addon_pct = (addon_sales / total_sales) if total_sales else 0.0
+    insul_pct = (sales_with_insul / total_sales) if total_sales else 0.0
+    rb_pct    = (sales_with_rb    / total_sales) if total_sales else 0.0
+    addon_pct = (sales_with_addon / total_sales) if total_sales else 0.0
 
     return Totals(
         total_appointments=total_appts,
@@ -217,7 +218,7 @@ def compute_totals(flag_df: pd.DataFrame) -> Totals:
         sales_rate_appt=sales_rate_appt,
         avg_sale=round(avg_sale, 2),
 
-        insul_sales=insul_sales, rb_sales=rb_sales, addon_sales=addon_sales,
+        sales_with_insul=sales_with_insul, sales_with_rb=sales_with_rb, sales_with_addon=sales_with_addon,
         insul_cost_sum=insul_cost_sum, insul_sqft_sum=insul_sqft_sum,
         rb_cost_sum=rb_cost_sum, rb_sqft_sum=rb_sqft_sum,
         insul_pct=insul_pct, rb_pct=rb_pct, addon_pct=addon_pct,
@@ -241,9 +242,9 @@ def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame
         sales = int(g["is_sale"].sum())
         sales_amt = float(g.loc[g["is_sale"], "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
 
-        insul_sales = int(g["has_insul"].sum())
-        rb_sales    = int(g["has_rb"].sum())
-        addon_sales = int(g["has_any_addon"].sum())
+        sales_with_insul = int(g["has_insul"].sum())
+        sales_with_rb    = int(g["has_rb"].sum())
+        sales_with_addon = int(g["has_any_addon"].sum())
 
         insul_cost_sum = float(g.loc[g["has_insul"], "Insulation Cost"].sum()) if "Insulation Cost" in g.columns else 0.0
         insul_sqft_sum = float(g.loc[g["has_insul"], "Insulation Sqft"].sum()) if "Insulation Sqft" in g.columns else 0.0
@@ -259,18 +260,19 @@ def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame
             "Sales $": sales_amt,
             "Avg Sale $": (sales_amt / sales) if sales else 0.0,
 
-            "Insul Sales #": insul_sales,
-            "Insul % of Sales": (insul_sales / sales) if sales else 0.0,
+            # Add-ons: attributes of the sales, not extra sales
+            "Sales with Insulation #": sales_with_insul,
+            "Insul % of Sales": (sales_with_insul / sales) if sales else 0.0,
             "Insul $": insul_cost_sum,
             "Insul Sqft": insul_sqft_sum,
 
-            "RB Sales #": rb_sales,
-            "RB % of Sales": (rb_sales / sales) if sales else 0.0,
+            "Sales with RB #": sales_with_rb,
+            "RB % of Sales": (sales_with_rb / sales) if sales else 0.0,
             "RB $": rb_cost_sum,
             "RB Sqft": rb_sqft_sum,
 
-            "Add-on Sales #": addon_sales,
-            "Add-on % of Sales": (addon_sales / sales) if sales else 0.0,
+            "Sales with Add-on #": sales_with_addon,
+            "Add-on % of Sales": (sales_with_addon / sales) if sales else 0.0,
         })
     rep = df.groupby(closer_col, dropna=False).apply(row).reset_index().rename(columns={closer_col: "Sales Rep"})
     return rep
@@ -287,17 +289,17 @@ def company_totals_row(flag_df: pd.DataFrame):
         "Sales $": t.total_contract_amount,
         "Avg Sale $": t.avg_sale,
 
-        "Insul Sales #": t.insul_sales,
+        "Sales with Insulation #": t.sales_with_insul,
         "Insul % of Sales": t.insul_pct,
         "Insul $": t.insul_cost_sum,
         "Insul Sqft": t.insul_sqft_sum,
 
-        "RB Sales #": t.rb_sales,
+        "Sales with RB #": t.sales_with_rb,
         "RB % of Sales": t.rb_pct,
         "RB $": t.rb_cost_sum,
         "RB Sqft": t.rb_sqft_sum,
 
-        "Add-on Sales #": t.addon_sales,
+        "Sales with Add-on #": t.sales_with_addon,
         "Add-on % of Sales": t.addon_pct,
     }
     harv_row = {
@@ -512,17 +514,17 @@ company_total_table = pd.DataFrame([{
     "Sales $": totals.total_contract_amount,
     "Avg Sale $": totals.avg_sale,
 
-    "Insul Sales #": totals.insul_sales,
+    "Sales with Insulation #": totals.sales_with_insul,
     "Insul % of Sales": int(round(totals.insul_pct * 100, 0)),
     "Insul $": totals.insul_cost_sum,
     "Insul Sqft": totals.insul_sqft_sum,
 
-    "RB Sales #": totals.rb_sales,
+    "Sales with RB #": totals.sales_with_rb,
     "RB % of Sales": int(round(totals.rb_pct * 100, 0)),
     "RB $": totals.rb_cost_sum,
     "RB Sqft": totals.rb_sqft_sum,
 
-    "Add-on Sales #": totals.addon_sales,
+    "Sales with Add-on #": totals.sales_with_addon,
     "Add-on % of Sales": int(round(totals.addon_pct * 100, 0)),
 }])
 
