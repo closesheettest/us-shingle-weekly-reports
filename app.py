@@ -809,14 +809,21 @@ with tab_overview:
     with c2:
         st.markdown("**Sales Snapshot (incl. Insulation / RB)**")
         st.dataframe(
-            sales_display, use_container_width=True, hide_index=True,
+            sales_display,
+            use_container_width=True,
+            hide_index=True,
             column_config={
                 "Sit %":   st.column_config.NumberColumn(format="%d%%"),
                 "Close %": st.column_config.NumberColumn(format="%d%%"),
                 "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
                 "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
-                "Add-on % of Sales":st.column_config.NumberColumn(format="%d%%"),
-                "Sales $": st.column_config.NumberColumn(format="$%.0f")),
+                "Add-on % of Sales": st.column_config.NumberColumn(format="%d%%"),
+                "Sales $": st.column_config.NumberColumn(format="$%.0f"),
+                "Avg Sale $": st.column_config.NumberColumn(format="$%.0f"),
+                "Insul $": st.column_config.NumberColumn(format="$%.0f"),
+                "RB $":    st.column_config.NumberColumn(format("$%.0f"),
+                ),
+            }
         )
 
 with tab_sources:
@@ -829,11 +836,11 @@ with tab_sources:
             "Close %": st.column_config.NumberColumn(format="%d%%"),
             "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
             "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
-            "Add-on % of Sales":st.column_config.NumberColumn(format="%d%%"),
+            "Add-on % of Sales": st.column_config.NumberColumn(format="%d%%"),
             "Sales $": st.column_config.NumberColumn(format="$%.0f"),
-            "Avg Sale $": st.column_config.NumberColumn(format="$%.0f"),
-            "Insul $": st.column_config.NumberColumn(format="$%.0f"),
-            "RB $":    st.column_config.NumberColumn(format="$%.0f"),
+            "Avg Sale $": st.column_config.NumberColumn(format("$%.0f")),
+            "Insul $": st.column_config.NumberColumn(format("$%.0f")),
+            "RB $":    st.column_config.NumberColumn(format("$%.0f")),
         }
     )
 
@@ -851,7 +858,8 @@ with tab_sources:
         elif mode_s == "Only No Shows":
             s_detail = s_detail[s_detail["is_noshow"]]
         elif mode_s != "All":
-            s_detail = s_detail[s_detail["is_sit_sales"] if sit_mode_key=="sales" else s_detail["is_sit_harv"]]
+            mask = s_detail["is_sit_sales"] if sit_mode_key == "sales" else s_detail["is_sit_harv"]
+            s_detail = s_detail[mask]
 
         st.dataframe(s_detail[[c for c in DETAIL_COLS if c in s_detail.columns]], use_container_width=True, hide_index=True)
         st.download_button(
