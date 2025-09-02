@@ -1,0 +1,19 @@
+{
+  "Sit": [
+    "Sit - No Sale",
+    "Sit - Pending",
+    "Sit - Sold"
+  ],
+  "Sold": [
+    "Signed Contract",
+    "Sit - Sold"
+  ],
+  "No Show": [
+    "No Show- H/O",
+    "NS",
+    "No-Show",
+    "NoShow",
+    "No Sit"
+  ],
+  "Set": []
+}
