@@ -1,4 +1,4 @@
-# app.py — Weekly Reports (with Insulation / Radiant Barrier analytics)
+# app.py — US Shingle Weekly Reports (with Insulation / Radiant Barrier analytics)
 
 import json, re
 from io import BytesIO
@@ -9,6 +9,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 st.set_page_config(page_title="US Shingle Weekly Reports", layout="wide", initial_sidebar_state="expanded")
+
+# ---------- tiny helper for Streamlit reruns ----------
+def safe_rerun():
+    try:
+        st.rerun()
+    except Exception:
+        pass
 
 # ---------- Simple styling ----------
 st.markdown("""
@@ -344,27 +351,33 @@ cols = list(df_in.columns)
 def guess(colnames, candidates):
     for c in candidates:
         for name in colnames:
-            if name.strip().lower() == c.strip().lower(): return name
+            if name.strip().lower() == c.strip().lower():
+                return name
     return None
 
-def sb_select(label, candidates, fallback=None, optional=False):
+def sb_select_required(label, candidates):
     g = guess(cols, candidates)
-    opts = ["<None>"] + cols if optional else cols
-    idx = 0 if optional else (cols.index(g) if g in cols else 0)
-    val = st.sidebar.selectbox(label, options=opts, index=idx)
-    return None if optional and val == "<None>" else val
+    idx = cols.index(g) if g in cols else 0
+    return st.sidebar.selectbox(label, options=cols, index=idx)
 
-job_col    = sb_select("Job/Record ID column", ["Job Name","Name","Job","ID","Record ID","Opportunity Name"])
-status_col = sb_select("Status column",         ["Status","Result","Outcome"])
-rep_col    = sb_select("Sales Rep column",      ["Sales Rep","Rep","Closer","Salesperson"])
-harv_col   = sb_select("Appointment Set By column", ["Appointment Set By","Setter","Set By","Harvester","Created By"])
-amt_col    = sb_select("Total Contract $ column",   ["Total Contract","Approved Estimates (Total)","Sale Amount","Contract Total","Amount"])
+def sb_select_optional(label, candidates):
+    g = guess(cols, candidates)
+    opts = ["<None>"] + cols
+    idx = opts.index(g) if g in opts else 0
+    val = st.sidebar.selectbox(label, options=opts, index=idx)
+    return None if val == "<None>" else val
+
+job_col    = sb_select_required("Job/Record ID column", ["Job Name","Name","Job","ID","Record ID","Opportunity Name"])
+status_col = sb_select_required("Status column",         ["Status","Result","Outcome"])
+rep_col    = sb_select_required("Sales Rep column",      ["Sales Rep","Rep","Closer","Salesperson"])
+harv_col   = sb_select_required("Appointment Set By column", ["Appointment Set By","Setter","Set By","Harvester","Created By"])
+amt_col    = sb_select_required("Total Contract $ column",   ["Total Contract","Approved Estimates (Total)","Sale Amount","Contract Total","Amount"])
 
 # NEW optional columns
-insul_cost_col = sb_select("Insulation Cost (optional)", ["Insulation Cost","Insualtion Cost","Insulation $","Insulation Amount"], optional=True)
-insul_sqft_col = sb_select("Insulation Sqft (optional)", ["Insulation Sqft","Insualtion Sqft","Insulation SF","Insulation Square Feet"], optional=True)
-rb_cost_col    = sb_select("Radiant Barrier Cost (optional)", ["Radiant Barrier Cost","RB Cost","Radiant Barrier $","Radiant Barrier Amount"], optional=True)
-rb_sqft_col    = sb_select("Radiant Barrier Sqft (optional)", ["Radiant Barrier Sqft","RB Sqft","Radiant Barrier SF","Radiant Barrier Square Feet"], optional=True)
+insul_cost_col = sb_select_optional("Insulation Cost (optional)", ["Insulation Cost","Insualtion Cost","Insulation $","Insulation Amount"])
+insul_sqft_col = sb_select_optional("Insulation Sqft (optional)", ["Insulation Sqft","Insualtion Sqft","Insulation SF","Insulation Square Feet"])
+rb_cost_col    = sb_select_optional("Radiant Barrier Cost (optional)", ["Radiant Barrier Cost","RB Cost","Radiant Barrier $","Radiant Barrier Amount"])
+rb_sqft_col    = sb_select_optional("Radiant Barrier Sqft (optional)", ["Radiant Barrier Sqft","RB Sqft","Radiant Barrier SF","Radiant Barrier Square Feet"])
 
 # Rename -> standard internal names
 raw_df = df_in.rename(columns={
@@ -374,12 +387,12 @@ raw_df = df_in.rename(columns={
     harv_col: "Appointment Set By",
     amt_col: "Total Contract",
 })
-# add optional columns if selected, else default zeros
 if insul_cost_col: raw_df = raw_df.rename(columns={insul_cost_col: "Insulation Cost"})
 if insul_sqft_col: raw_df = raw_df.rename(columns={insul_sqft_col: "Insulation Sqft"})
 if rb_cost_col:    raw_df = raw_df.rename(columns={rb_cost_col: "Radiant Barrier Cost"})
 if rb_sqft_col:    raw_df = raw_df.rename(columns={rb_sqft_col: "Radiant Barrier Sqft"})
 
+# Ensure optional columns exist
 for missing, default in [
     ("Insulation Cost", 0.0), ("Insulation Sqft", 0.0),
     ("Radiant Barrier Cost", 0.0), ("Radiant Barrier Sqft", 0.0),
@@ -417,7 +430,8 @@ with c3:
             incoming = json.load(up)
             if all(k in incoming for k in ["Sit","Sold","No Show","Set"]):
                 ok, msg = save_aliases(incoming)
-                (st.success if ok else st.error)(msg); st.experimental_rerun()
+                (st.success if ok else st.error)(msg)
+                safe_rerun()
             else:
                 st.error("Invalid mapping file (missing keys).")
         except Exception as e:
@@ -461,11 +475,11 @@ if row_ids:
     with a:
         if st.button("Save Override"):
             st.session_state.overrides[sel] = {"override_to_sit": ov_sit, "note": note}
-            st.experimental_rerun()
+            safe_rerun()
     with b:
         if st.button("Clear Override"):
             if sel in st.session_state.overrides: del st.session_state.overrides[sel]
-            st.experimental_rerun()
+            safe_rerun()
 
 # Re-apply overrides & flags
 flag_df = apply_overrides(flag_df, st.session_state.overrides, id_col=ROW_ID_COL)
@@ -483,7 +497,10 @@ sales_with_total     = pd.concat([sales_report,     pd.DataFrame([sales_total_ro
 
 # Percent display (whole numbers)
 harv_display  = pct_to_int(harvester_with_total, ["Sit %"])
-sales_display = pct_to_int(sales_with_total, ["Sit %","Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"])
+sales_display = pct_to_int(
+    sales_with_total,
+    ["Sit %","Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"]
+)
 
 # Company Total (single-row)
 company_total_table = pd.DataFrame([{
@@ -522,7 +539,7 @@ for col in ["is_sit","is_sale","is_noshow","has_insul","has_rb","has_any_addon"]
 
 # ---------- Header & KPI cards ----------
 st.title("US Shingle Weekly Reports")
-st.caption("Tip: ⌘/Ctrl+B toggles the sidebar.")
+st.caption("Tip: ⌘/Ctrl + B toggles the sidebar.")
 if ignored_closers:
     st.info(f"Ignoring {len(ignored_closers)} closer(s): {', '.join(ignored_closers)}")
 
@@ -665,11 +682,11 @@ with tab_exports:
     colA, colB = st.columns(2)
     with colA:
         st.download_button("Download Harvester CSV", data=harv_display.to_csv(index=False).encode("utf-8"),
-                           file_name="harvester_report.csv", mime="text/csv", use_container_width=True)
+                           file_name="harvester_report.csv", mime="text/csv")
         st.download_button("Download Sales CSV", data=sales_display.to_csv(index=False).encode("utf-8"),
-                           file_name="sales_report.csv", mime="text/csv", use_container_width=True)
+                           file_name="sales_report.csv", mime="text/csv")
         st.download_button("Download Company Total CSV", data=company_total_table.to_csv(index=False).encode("utf-8"),
-                           file_name="company_total.csv", mime="text/csv", use_container_width=True)
+                           file_name="company_total.csv", mime="text/csv")
     with colB:
         all_bytes = to_excel_bytes(
             CompanyTotal=company_total_table,
@@ -679,8 +696,7 @@ with tab_exports:
         )
         st.download_button("Download Excel (All Sheets)", data=all_bytes,
                            file_name="weekly_reports.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.write("")
 if st.button("Print Page"):
