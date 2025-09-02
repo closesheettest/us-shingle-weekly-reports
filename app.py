@@ -1,51 +1,45 @@
-def build_flags(df: pd.DataFrame, *, rules: dict,
-                infer_sale_from_amount: bool,
-                count_sold_as_sit_harv: bool,
-                count_sold_as_sit_sales: bool) -> pd.DataFrame:
-    out = df.copy()
-    status_clean = out["Status"].astype(str).str.strip()
+def compute_source_report(flag_df: pd.DataFrame, source_col: str = "Source", sit_mode: str = "sales") -> pd.DataFrame:
+    df = flag_df.copy()
+    if source_col not in df.columns:
+        df[source_col] = ""
+    sit_flag = "is_sit_sales" if sit_mode == "sales" else "is_sit_harv"
 
-    sit_harv_set = set(rules.get("sit_harvester", []))
-    sit_sales_set = set(rules.get("sit_sales", []))
-    sale_set      = set(rules.get("sale", []))
-    noshow_set    = set(rules.get("no_show", []))
+    def row(g: pd.DataFrame):
+        appts = len(g)
+        sits  = int(g[sit_flag].sum())
+        sales = int(g["is_sale"].sum())  # may include $>0 inference
 
-    # Strict sale flag: ONLY by status
-    is_sale_status = status_clean.isin(sale_set)
-    out["is_sale_status"] = is_sale_status
+        sale_mask = g.get("is_sale_status", pd.Series(False, index=g.index)).astype(bool)
+        sales_amt = float(g.loc[sale_mask, "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
+        strict_sales = int(sale_mask.sum())
 
-    # Backward-compatible sale flag (may include $>0 inference if enabled)
-    is_sale_from_rule = is_sale_status
-    is_sale_from_amt  = False
-    if "Total Contract" in out.columns:
-        is_sale_from_amt = pd.to_numeric(out["Total Contract"], errors="coerce").fillna(0) > 0
-    out["is_sale"] = is_sale_from_rule | (infer_sale_from_amount & is_sale_from_amt)
+        sales_with_insul = int(g["has_insul"].sum())
+        sales_with_rb    = int(g["has_rb"].sum())
+        sales_with_addon = int(g["has_any_addon"].sum())
 
-    # Sit flags (separate)
-    out["is_sit_harv"]  = status_clean.isin(sit_harv_set)  | (count_sold_as_sit_harv  & out["is_sale"])
-    out["is_sit_sales"] = status_clean.isin(sit_sales_set) | (count_sold_as_sit_sales & out["is_sale"])
+        insul_cost_sum = float(g.loc[g["has_insul"], "Insulation Cost"].sum()) if "Insulation Cost" in g.columns else 0.0
+        rb_cost_sum    = float(g.loc[g["has_rb"], "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in g.columns else 0.0
 
-    # No Show
-    out["is_noshow"] = status_clean.isin(noshow_set)
+        return pd.DataFrame([{
+            "Appointments": appts,
+            "Sits": sits,
+            "Sit %": (sits / appts) if appts else 0.0,
+            "Sales": sales,
+            "Close %": (sales / sits) if sits else 0.0,
+            "Sales $": sales_amt,
+            "Avg Sale $": (sales_amt / strict_sales) if strict_sales else 0.0,
 
-    # OVERRIDES → Harvester only
-    if "Override To Sit" in out.columns:
-        ov = out["Override To Sit"].fillna(False).astype(bool)
-        out.loc[ov, "is_sit_harv"] = True
+            "Sales with Insulation #": sales_with_insul,
+            "Insul % of Sales": (sales_with_insul / strict_sales) if strict_sales else 0.0,
+            "Insul $": insul_cost_sum,
 
-    # Insulation / RB attributes (count ONLY when status is a Sale)
-    insul_cost = out.get("Insulation Cost", pd.Series(0, index=out.index))
-    insul_sqft = out.get("Insulation Sqft", pd.Series(0, index=out.index))
-    rb_cost    = out.get("Radiant Barrier Cost", pd.Series(0, index=out.index))
-    rb_sqft    = out.get("Radiant Barrier Sqft", pd.Series(0, index=out.index))
+            "Sales with RB #": sales_with_rb,
+            "RB % of Sales": (sales_with_rb / strict_sales) if strict_sales else 0.0,
+            "RB $": rb_cost_sum,
 
-    has_insul_any = (pd.to_numeric(insul_cost, errors="coerce").fillna(0) > 0) | \
-                    (pd.to_numeric(insul_sqft, errors="coerce").fillna(0) > 0)
-    has_rb_any    = (pd.to_numeric(rb_cost,  errors="coerce").fillna(0) > 0) | \
-                    (pd.to_numeric(rb_sqft,  errors="coerce").fillna(0) > 0)
+            "Sales with Add-on #": sales_with_addon,
+            "Add-on % of Sales": (sales_with_addon / strict_sales) if strict_sales else 0.0,
+        }])
 
-    # IMPORTANT: gate by is_sale_status (strict, by status)
-    out["has_insul"]      = is_sale_status & has_insul_any
-    out["has_rb"]         = is_sale_status & has_rb_any
-    out["has_any_addon"]  = is_sale_status & (has_insul_any | has_rb_any)
-    return out
+    rep = df.groupby(source_col, dropna=False).apply(row).reset_index(level=1, drop=True).reset_index().rename(columns={source_col: "Source"})
+    return rep
