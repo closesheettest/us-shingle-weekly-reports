@@ -1,13 +1,14 @@
 # app.py — US Shingle Weekly Reports
-# - Status Rules editor lists ONLY statuses present in the uploaded file
-# - Auto-save rules (merged into status_rules.json; older rules preserved)
-# - Separate Sit (Harvester) vs Sit (Sales)
-# - Overrides: "Override to SIT" affects **Harvester only** (does NOT affect Sales)
-# - Insulation/RB are attributes on sales (do not create extra sales)
+# - Status Rules editor lists ONLY statuses in current file; auto-save merges into status_rules.json
+# - Overrides: "Override to Sit" affects HARVESTER ONLY (does NOT affect Sales-side sits)
+# - Insulation/Radiant Barrier are attributes of sales
+# - Adds Sources report + exports
+# - Printable Harvester report with overrides & notes
 
 import json, re
 from io import BytesIO
 from pathlib import Path
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -27,7 +28,7 @@ st.markdown("""
 <style>
 .kpi-row { display:grid; grid-template-columns:repeat(7,minmax(120px,1fr)); gap:12px; }
 .kpi-card { background:#ffffff10; border:1px solid rgba(120,120,120,.15); border-radius:16px; padding:16px 14px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
-.kpi-label { font-size:12px; color:var(--text-color,#6b7280); text-transform:uppercase; letter-spacing:.04em; }
+.kpi-label { font-size:12px; color:#6b7280; text-transform:uppercase; letter-spacing:.04em; }
 .kpi-value { font-size:22px; font-weight:700; margin-top:4px; }
 hr.divider { border:none; border-top:1px solid rgba(120,120,120,.2); margin:14px 0 8px 0; }
 </style>
@@ -37,6 +38,81 @@ hr.divider { border:none; border-top:1px solid rgba(120,120,120,.2); margin:14px
 APP_DIR = Path(__file__).resolve().parent
 RULES_FILE = APP_DIR / "status_rules.json"
 OLD_ALIASES_FILE = APP_DIR / "status_aliases.json"  # legacy import
+
+# ---------- Printable HTML helper (Harvester) ----------
+def _fmt_money(x):
+    try:
+        return f"${float(x):,.0f}"
+    except Exception:
+        return x
+
+def build_printable_harvester_html(harvester_name: str, summary: dict, df: pd.DataFrame) -> str:
+    cols_want = [
+        "City","Job Name","Start Date","Status","Sales Rep","Closer (derived)","Appointment Set By",
+        "Total Contract","is_sit_harv","is_sale","is_noshow","Override To Sit","Override Note"
+    ]
+    present = [c for c in cols_want if c in df.columns]
+    table = df[present].copy()
+
+    if "Total Contract" in table.columns:
+        table["Total Contract"] = table["Total Contract"].map(_fmt_money)
+    for bcol, label in [("is_sit_harv","Sit (Harvester)"), ("is_sale","Sale"), ("is_noshow","No Show")]:
+        if bcol in table.columns:
+            table[label] = table[bcol].map(lambda v: "✓" if bool(v) else "")
+            table.drop(columns=[bcol], inplace=True)
+
+    order = [c for c in ["City","Job Name","Start Date","Status","Sales Rep","Closer (derived)","Appointment Set By",
+                         "Total Contract","Sit (Harvester)","Sale","No Show","Override To Sit","Override Note"]
+             if c in table.columns]
+    table = table[order]
+    table_html = table.to_html(index=False, escape=False)
+
+    now = datetime.now().strftime("%Y-%m-%d %I:%M %p")
+    def pct(n):
+        try:
+            return f"{round(float(n)*100):.0f}%"
+        except Exception:
+            return "0%"
+
+    html = f"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Harvester Report — {harvester_name}</title>
+<style>
+  body {{ font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; color:#111; }}
+  h1 {{ margin: 0 0 6px; }}
+  .sub {{ color:#555; margin-bottom: 16px; }}
+  .grid {{ display:grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap: 10px; margin: 14px 0 18px; }}
+  .kpi {{ border:1px solid #ddd; border-radius:12px; padding:10px 12px; }}
+  .kpi .lbl {{ font-size:12px; text-transform:uppercase; color:#666; letter-spacing:.04em; }}
+  .kpi .val {{ font-size:20px; font-weight:700; margin-top:4px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #ccc; padding: 6px 8px; font-size: 12px; vertical-align: top; }}
+  th {{ background:#f6f6f6; text-align:left; }}
+  @media print {{ .noprint {{ display:none; }} body {{ margin: 0.25in; }} }}
+</style>
+</head>
+<body onload="window.print()">
+  <div class="noprint" style="text-align:right;margin-bottom:8px;">
+    <button onclick="window.print()" style="padding:6px 10px;border-radius:8px;border:1px solid #999;background:#fff;cursor:pointer;">Print</button>
+  </div>
+  <h1>Harvester: {harvester_name}</h1>
+  <div class="sub">Generated {now}</div>
+  <div class="grid">
+    <div class="kpi"><div class="lbl">Appointments</div><div class="val">{summary.get('appointments',0):,}</div></div>
+    <div class="kpi"><div class="lbl">Sits (Harvester)</div><div class="val">{summary.get('sits_harv',0):,}</div></div>
+    <div class="kpi"><div class="lbl">Sit %</div><div class="val">{pct(summary.get('sit_rate_harv',0.0))}</div></div>
+    <div class="kpi"><div class="lbl">Sales</div><div class="val">{summary.get('sales',0):,}</div></div>
+    <div class="kpi"><div class="lbl">Close %</div><div class="val">{pct(summary.get('close_rate',0.0))}</div></div>
+    <div class="kpi"><div class="lbl">Sales $</div><div class="val">{_fmt_money(summary.get('sales_amt',0))}</div></div>
+  </div>
+  {table_html}
+</body>
+</html>
+"""
+    return html
 
 # ---------- Numeric helpers ----------
 def _coerce_money(series: pd.Series) -> pd.Series:
@@ -82,12 +158,7 @@ def derive_closer_column(df: pd.DataFrame, sales_col="Sales Rep", setter_col="Ap
     return closer.fillna("")
 
 # ---------- Rules I/O ----------
-DEFAULT_RULES = {
-    "sit_harvester": [],
-    "sit_sales": [],
-    "sale": [],
-    "no_show": [],
-}
+DEFAULT_RULES = {"sit_harvester": [], "sit_sales": [], "sale": [], "no_show": []}
 
 def _import_legacy_aliases_once() -> dict:
     rules = dict(DEFAULT_RULES)
@@ -125,18 +196,18 @@ def save_rules(rules: dict):
     except Exception as e:
         return False, f"Could not save rules: {e}"
 
-# ---------- Overrides (store flags only; sit enforcement handled in build_flags) ----------
+# ---------- Overrides (Harvester-only sit flag) ----------
 def apply_overrides(df: pd.DataFrame, overrides, id_col="Job Name") -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame) or df.empty or id_col not in df.columns or not overrides:
         return df
     out = df.copy()
-    if "Override To Sit" not in out.columns: out["Override To Sit"] = False  # meaning: Harvester SIT only
+    if "Override To Sit" not in out.columns: out["Override To Sit"] = False  # Harvester only
     if "Override Note" not in out.columns: out["Override Note"] = ""
     for row_id, payload in overrides.items():
         mask = out[id_col].astype(str) == str(row_id)
         if not mask.any(): continue
         if payload.get("override_to_sit"):
-            out.loc[mask, "Override To Sit"] = True   # Harvester-only
+            out.loc[mask, "Override To Sit"] = True
         note = payload.get("note")
         if isinstance(note, str) and note.strip():
             out.loc[mask, "Override Note"] = note.strip()
@@ -169,11 +240,10 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
     # No Show
     out["is_noshow"] = status_clean.isin(noshow_set)
 
-    # OVERRIDES → Harvester only (DO NOT affect Sales sits)
+    # OVERRIDES → Harvester only
     if "Override To Sit" in out.columns:
         ov = out["Override To Sit"].fillna(False).astype(bool)
         out.loc[ov, "is_sit_harv"] = True
-        # intentionally NOT touching is_sit_sales here
 
     # Insulation / RB attributes (on sold rows; not extra sales)
     insul_cost = out.get("Insulation Cost", pd.Series(0, index=out.index))
@@ -188,7 +258,7 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
 
     out["has_insul"]      = out["is_sale"] & has_insul_any
     out["has_rb"]         = out["is_sale"] & has_rb_any
-    out["has_any_addon"]  = out["is_sale"] & (has_insul_any | has_rb_any)  # count sale once, even if both
+    out["has_any_addon"]  = out["is_sale"] & (has_insul_any | has_rb_any)
     return out
 
 # ---------- Totals & Reports ----------
@@ -286,6 +356,53 @@ def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame
     rep = df.groupby(closer_col, dropna=False).apply(row).reset_index().rename(columns={closer_col: "Sales Rep"})
     return rep
 
+def compute_source_report(flag_df: pd.DataFrame, source_col: str = "Source", sit_mode: str = "sales") -> pd.DataFrame:
+    """
+    sit_mode: 'sales' uses Sales sits (is_sit_sales) to align with Close %,
+              'harvester' uses Harvester sits (is_sit_harv).
+    """
+    df = flag_df.copy()
+    if source_col not in df.columns:
+        df[source_col] = ""
+    sit_flag = "is_sit_sales" if sit_mode == "sales" else "is_sit_harv"
+
+    def row(g: pd.DataFrame):
+        appts = len(g)
+        sits  = int(g[sit_flag].sum())
+        sales = int(g["is_sale"].sum()) if "is_sale" in g.columns else 0
+        sales_amt = float(g.loc[g.get("is_sale", pd.Series(False)).astype(bool), "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
+
+        sales_with_insul = int(g["has_insul"].sum()) if "has_insul" in g.columns else 0
+        sales_with_rb    = int(g["has_rb"].sum())    if "has_rb"    in g.columns else 0
+        sales_with_addon = int(g["has_any_addon"].sum()) if "has_any_addon" in g.columns else 0
+
+        insul_cost_sum = float(g.loc[g.get("has_insul", pd.Series(False)).astype(bool), "Insulation Cost"].sum()) if "Insulation Cost" in g.columns else 0.0
+        rb_cost_sum    = float(g.loc[g.get("has_rb",    pd.Series(False)).astype(bool), "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in g.columns else 0.0
+
+        return pd.Series({
+            "Appointments": appts,
+            "Sits": sits,
+            "Sit %": (sits / appts) if appts else 0.0,
+            "Sales": sales,
+            "Close %": (sales / sits) if sits else 0.0,
+            "Sales $": sales_amt,
+            "Avg Sale $": (sales_amt / sales) if sales else 0.0,
+
+            "Sales with Insulation #": sales_with_insul,
+            "Insul % of Sales": (sales_with_insul / sales) if sales else 0.0,
+            "Insul $": insul_cost_sum,
+
+            "Sales with RB #": sales_with_rb,
+            "RB % of Sales": (sales_with_rb / sales) if sales else 0.0,
+            "RB $": rb_cost_sum,
+
+            "Sales with Add-on #": sales_with_addon,
+            "Add-on % of Sales": (sales_with_addon / sales) if sales else 0.0,
+        })
+
+    rep = df.groupby(source_col, dropna=False).apply(row).reset_index().rename(columns={source_col: "Source"})
+    return rep
+
 def company_totals_row(flag_df: pd.DataFrame):
     t = compute_totals(flag_df)
     sales_row = {
@@ -319,6 +436,7 @@ def company_totals_row(flag_df: pd.DataFrame):
     }
     return harv_row, sales_row
 
+# ---------- helpers ----------
 def to_excel_bytes(**dfs):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -384,6 +502,7 @@ status_col = sb_select_required("Status column",         ["Status","Result","Out
 rep_col    = sb_select_required("Sales Rep column",      ["Sales Rep","Rep","Closer","Salesperson"])
 harv_col   = sb_select_required("Appointment Set By column", ["Appointment Set By","Setter","Set By","Harvester","Created By"])
 amt_col    = sb_select_required("Total Contract $ column",   ["Total Contract","Approved Estimates (Total)","Sale Amount","Contract Total","Amount"])
+source_col = sb_select_optional("Source column (optional)",  ["Source","Lead Source","Campaign","Channel"])
 
 insul_cost_col = sb_select_optional("Insulation Cost (optional)", ["Insulation Cost","Insualtion Cost","Insulation $","Insulation Amount"])
 insul_sqft_col = sb_select_optional("Insulation Sqft (optional)", ["Insulation Sqft","Insualtion Sqft","Insulation SF","Insulation Square Feet"])
@@ -398,12 +517,15 @@ raw_df = df_in.rename(columns={
     harv_col: "Appointment Set By",
     amt_col: "Total Contract",
 })
+if source_col:     raw_df = raw_df.rename(columns={source_col: "Source"})
 if insul_cost_col: raw_df = raw_df.rename(columns={insul_cost_col: "Insulation Cost"})
 if insul_sqft_col: raw_df = raw_df.rename(columns={insul_sqft_col: "Insulation Sqft"})
 if rb_cost_col:    raw_df = raw_df.rename(columns={rb_cost_col: "Radiant Barrier Cost"})
 if rb_sqft_col:    raw_df = raw_df.rename(columns={rb_sqft_col: "Radiant Barrier Sqft"})
 
+# Ensure optional columns exist
 for missing, default in [
+    ("Source", ""),
     ("Insulation Cost", 0.0), ("Insulation Sqft", 0.0),
     ("Radiant Barrier Cost", 0.0), ("Radiant Barrier Sqft", 0.0),
 ]:
@@ -524,6 +646,11 @@ infer_from_amount = st.sidebar.checkbox("Infer Sold if $ > 0", value=True)
 count_sold_as_sit_harv  = st.sidebar.checkbox("Count Sold rows as Sits (Harvester)", value=True)
 count_sold_as_sit_sales = st.sidebar.checkbox("Count Sold rows as Sits (Sales)", value=True)
 
+# ---------- Sources report options ----------
+st.sidebar.subheader("Sources Report Options")
+source_sit_mode = st.sidebar.radio("Source Sit uses:", ["Sales sits (recommended)", "Harvester sits"], index=0)
+sit_mode_key = "sales" if source_sit_mode.startswith("Sales") else "harvester"
+
 # ---------- Overrides ----------
 ROW_ID_COL = "Job Name"
 if "overrides" not in st.session_state: st.session_state.overrides = {}
@@ -532,7 +659,6 @@ row_ids = safe_unique_sorted(work_df["Job Name"], exclude=("",))
 if row_ids:
     sel = st.sidebar.selectbox("Select a record", options=row_ids, key="override_select")
     cur_ov = st.session_state.overrides.get(sel, {"override_to_sit": False, "note": ""})
-    # Label clearly states HARVESTER ONLY
     ov_sit = st.sidebar.checkbox("Override to **HARVESTER** Sit (does NOT affect Sales)", value=cur_ov.get("override_to_sit", False))
     note = st.sidebar.text_area("Note (why?)", value=cur_ov.get("note", ""), height=80)
     a,b = st.sidebar.columns(2)
@@ -559,15 +685,38 @@ flag_df = build_flags(
 totals = compute_totals(flag_df)
 harvester_report = compute_harvester_report(flag_df, setter_col="Appointment Set By")
 sales_report     = compute_sales_report(flag_df, closer_col="Closer (derived)")
+source_report    = compute_source_report(flag_df, source_col="Source", sit_mode=sit_mode_key)
 
 # Append TOTAL rows
 harv_total_row, sales_total_row = company_totals_row(flag_df)
 harvester_with_total = pd.concat([harvester_report, pd.DataFrame([harv_total_row])], ignore_index=True)
 sales_with_total     = pd.concat([sales_report,     pd.DataFrame([sales_total_row])], ignore_index=True)
 
+src_tot = compute_totals(flag_df)
+source_total_row = {
+    "Source": "TOTAL",
+    "Appointments": src_tot.total_appointments,
+    "Sits": src_tot.sits_sales if sit_mode_key == "sales" else src_tot.sits_harv,
+    "Sit %": src_tot.sit_rate_sales if sit_mode_key == "sales" else src_tot.sit_rate_harv,
+    "Sales": src_tot.total_sales,
+    "Close %": src_tot.close_rate,
+    "Sales $": src_tot.total_contract_amount,
+    "Avg Sale $": src_tot.avg_sale,
+    "Sales with Insulation #": src_tot.sales_with_insul,
+    "Insul % of Sales": src_tot.insul_pct,
+    "Insul $": src_tot.insul_cost_sum,
+    "Sales with RB #": src_tot.sales_with_rb,
+    "RB % of Sales": src_tot.rb_pct,
+    "RB $": src_tot.rb_cost_sum,
+    "Sales with Add-on #": src_tot.sales_with_addon,
+    "Add-on % of Sales": src_tot.addon_pct,
+}
+source_with_total = pd.concat([source_report, pd.DataFrame([source_total_row])], ignore_index=True)
+
 # Display-friendly % (whole numbers)
-harv_display  = pct_to_int(harvester_with_total, ["Sit %"])
-sales_display = pct_to_int(sales_with_total, ["Sit %","Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"])
+harv_display   = pct_to_int(harvester_with_total, ["Sit %"])
+sales_display  = pct_to_int(sales_with_total, ["Sit %","Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"])
+source_display = pct_to_int(source_with_total,    ["Sit %","Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"])
 
 # Company Total (single-row)
 company_total_table = pd.DataFrame([{
@@ -580,24 +729,21 @@ company_total_table = pd.DataFrame([{
     "Close %": int(round(totals.close_rate * 100, 0)),
     "Sales $": totals.total_contract_amount,
     "Avg Sale $": totals.avg_sale,
-
     "Sales with Insulation #": totals.sales_with_insul,
     "Insul % of Sales": int(round(totals.insul_pct * 100, 0)),
     "Insul $": totals.insul_cost_sum,
     "Insul Sqft": totals.insul_sqft_sum,
-
     "Sales with RB #": totals.sales_with_rb,
     "RB % of Sales": int(round(totals.rb_pct * 100, 0)),
     "RB $": totals.rb_cost_sum,
     "RB Sqft": totals.rb_sqft_sum,
-
     "Sales with Add-on #": totals.sales_with_addon,
     "Add-on % of Sales": int(round(totals.addon_pct * 100, 0)),
 }])
 
 # Detail view
 DETAIL_COLS = [
-    "City","Job Name","Start Date","Status","Sales Rep","Closer (derived)","Appointment Set By",
+    "City","Job Name","Start Date","Status","Source","Sales Rep","Closer (derived)","Appointment Set By",
     "Total Contract","Insulation Cost","Insulation Sqft","Radiant Barrier Cost","Radiant Barrier Sqft",
     "is_sit_harv","is_sit_sales","is_sale","is_noshow","has_insul","has_rb","has_any_addon",
     "Override To Sit","Override Note"
@@ -629,8 +775,8 @@ st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
 # ---------- Tabs ----------
-tab_overview, tab_setters, tab_closers, tab_detail, tab_audit, tab_exports = st.tabs(
-    ["📊 Overview", "🌱 Setters (Harvester)", "💼 Closers (Sales)", "🧾 Detail", "📝 Audit", "⬇️ Export"]
+tab_overview, tab_sources, tab_setters, tab_closers, tab_detail, tab_audit, tab_exports = st.tabs(
+    ["📊 Overview", "📣 Sources", "🌱 Setters (Harvester)", "💼 Closers (Sales)", "🧾 Detail", "📝 Audit", "⬇️ Export"]
 )
 
 with tab_overview:
@@ -647,8 +793,8 @@ with tab_overview:
             "Insul % of Sales":  st.column_config.NumberColumn(format="%d%%"),
             "RB % of Sales":     st.column_config.NumberColumn(format="%d%%"),
             "Add-on % of Sales": st.column_config.NumberColumn(format="%d%%"),
-            "Insul $": st.column_config.NumberColumn(format="$%.0f"),
-            "RB $":    st.column_config.NumberColumn(format="$%.0f"),
+            "Insul $":           st.column_config.NumberColumn(format="$%.0f"),
+            "RB $":              st.column_config.NumberColumn(format="$%.0f"),
         }
     )
 
@@ -670,21 +816,52 @@ with tab_overview:
                 "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
                 "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
                 "Add-on % of Sales":st.column_config.NumberColumn(format="%d%%"),
-                "Sales $": st.column_config.NumberColumn(format="$%.0f"),
-                "Avg Sale $": st.column_config.NumberColumn(format("$%.0f")),
-                "Insul $": st.column_config.NumberColumn(format("$%.0f")),
-                "RB $":    st.column_config.NumberColumn(format("$%.0f")),
-            }
+                "Sales $": st.column_config.NumberColumn(format="$%.0f")),
         )
 
-    st.subheader("Company Raw Line Items")
-    mode = st.radio("Filter:", ["All", "Only Sits (Harvester)", "Only Sits (Sales)", "Only Sales", "Only No Shows"],
-                    horizontal=True, key="company_mode")
-    comp_detail = filter_detail(detail_display, mode)
-    st.dataframe(comp_detail[[c for c in DETAIL_COLS if c in comp_detail.columns]],
-                 use_container_width=True, hide_index=True)
-    st.download_button("Download Company Raw CSV", data=comp_detail.to_csv(index=False).encode("utf-8"),
-                       file_name="company_raw_line_items.csv", mime="text/csv")
+with tab_sources:
+    st.subheader("Sources Report")
+    st.caption(f"Sits use: **{'Sales sits' if sit_mode_key=='sales' else 'Harvester sits'}**")
+    st.dataframe(
+        source_display, use_container_width=True, hide_index=True,
+        column_config={
+            "Sit %":   st.column_config.NumberColumn(format="%d%%"),
+            "Close %": st.column_config.NumberColumn(format="%d%%"),
+            "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
+            "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
+            "Add-on % of Sales":st.column_config.NumberColumn(format="%d%%"),
+            "Sales $": st.column_config.NumberColumn(format="$%.0f"),
+            "Avg Sale $": st.column_config.NumberColumn(format="$%.0f"),
+            "Insul $": st.column_config.NumberColumn(format="$%.0f"),
+            "RB $":    st.column_config.NumberColumn(format="$%.0f"),
+        }
+    )
+
+    st.markdown("### Raw Line Items for a Source")
+    src_list = safe_unique_sorted(source_report["Source"])
+    if src_list:
+        sel_s = st.selectbox("Choose Source", options=src_list, key="source_choice")
+        only_sits_label = "Only Sits (Sales)" if sit_mode_key == "sales" else "Only Sits (Harvester)"
+        mode_s = st.radio("Filter:", ["All", only_sits_label, "Only Sales", "Only No Shows"],
+                          horizontal=True, key="src_mode")
+
+        s_detail = detail_display[ detail_display["Source"].astype(str).str.strip() == sel_s ].copy()
+        if mode_s == "Only Sales":
+            s_detail = s_detail[s_detail["is_sale"]]
+        elif mode_s == "Only No Shows":
+            s_detail = s_detail[s_detail["is_noshow"]]
+        elif mode_s != "All":
+            s_detail = s_detail[s_detail["is_sit_sales"] if sit_mode_key=="sales" else s_detail["is_sit_harv"]]
+
+        st.dataframe(s_detail[[c for c in DETAIL_COLS if c in s_detail.columns]], use_container_width=True, hide_index=True)
+        st.download_button(
+            f"Download Raw CSV — {sel_s}",
+            data=s_detail.to_csv(index=False).encode("utf-8"),
+            file_name=f"source_raw_{sel_s.replace(' ','_')}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("No sources found.")
 
 with tab_setters:
     st.subheader("Harvester Report (Appointment Set By)")
@@ -697,12 +874,62 @@ with tab_setters:
         sel_h = st.selectbox("Choose Harvester", options=harv_list, key="harv_choice")
         mode_h = st.radio("Filter:", ["All", "Only Sits (Harvester)", "Only Sales", "Only No Shows"],
                           horizontal=True, key="harv_mode")
-        h_detail = detail_display[ detail_display["Appointment Set By"].astype(str).str.strip() == sel_h ].copy()
-        h_detail = filter_detail(h_detail, mode_h)
-        st.dataframe(h_detail[[c for c in DETAIL_COLS if c in h_detail.columns]], use_container_width=True, hide_index=True)
-        st.download_button(f"Download Raw CSV — {sel_h}",
-                           data=h_detail.to_csv(index=False).encode("utf-8"),
-                           file_name=f"harvester_raw_{sel_h.replace(' ','_')}.csv", mime="text/csv")
+        h_all = detail_display[ detail_display["Appointment Set By"].astype(str).str.strip() == sel_h ].copy()
+        h_detail = filter_detail(h_all, mode_h)
+        st.dataframe(h_detail[[c for c in DETAIL_COLS if c in h_detail.columns]],
+                     use_container_width=True, hide_index=True)
+
+        # Summary for selected harvester (ALL rows for that harvester)
+        try:
+            apps = int(len(h_all))
+            sits_h = int(h_all["is_sit_harv"].sum()) if "is_sit_harv" in h_all.columns else 0
+            sits_s = int(h_all["is_sit_sales"].sum()) if "is_sit_sales" in h_all.columns else 0
+            sales_n = int(h_all["is_sale"].sum()) if "is_sale" in h_all.columns else 0
+            sales_amt = float(h_all.loc[h_all.get("is_sale", pd.Series(False)).astype(bool), "Total Contract"].sum()) if "Total Contract" in h_all.columns else 0.0
+            sit_rate_h = (sits_h / apps) if apps else 0.0
+            close_rate = (sales_n / sits_s) if sits_s else 0.0
+        except Exception:
+            apps=sits_h=sits_s=sales_n=0; sales_amt=0.0; sit_rate_h=close_rate=0.0
+
+        summary = {
+            "appointments": apps,
+            "sits_harv": sits_h,
+            "sit_rate_harv": sit_rate_h,
+            "sales": sales_n,
+            "close_rate": close_rate,
+            "sales_amt": sales_amt,
+        }
+
+        # Printable HTML for this harvester (uses current filtered rows)
+        html_doc = build_printable_harvester_html(sel_h, summary, h_detail)
+
+        cA, cB = st.columns(2)
+        with cA:
+            if st.button("🖨 Print This Harvester (with overrides & notes)", key="print_harvester"):
+                js = f"""
+                <script>
+                  const html = `{html_doc.replace("\\", "\\\\").replace("`", "\\`")}`;
+                  const w = window.open("", "_blank");
+                  w.document.open();
+                  w.document.write(html);
+                  w.document.close();
+                </script>
+                """
+                components.html(js, height=0)
+        with cB:
+            st.download_button(
+                "⬇️ Download Printable HTML",
+                data=html_doc.encode("utf-8"),
+                file_name=f"harvester_{sel_h.replace(' ','_')}.html",
+                mime="text/html"
+            )
+
+        st.download_button(
+            f"Download Raw CSV — {sel_h}",
+            data=h_detail.to_csv(index=False).encode("utf-8"),
+            file_name=f"harvester_raw_{sel_h.replace(' ','_')}.csv",
+            mime="text/csv"
+        )
     else:
         st.info("No harvesters found.")
 
@@ -716,7 +943,7 @@ with tab_closers:
             "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
             "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
             "Add-on % of Sales":st.column_config.NumberColumn(format="%d%%"),
-            "Sales $": st.column_config.NumberColumn(format("$%.0f")),
+            "Sales $": st.column_config.NumberColumn(format="$%.0f"),
             "Avg Sale $": st.column_config.NumberColumn(format("$%.0f")),
             "Insul $": st.column_config.NumberColumn(format("$%.0f")),
             "RB $":    st.column_config.NumberColumn(format("$%.0f")),
@@ -732,9 +959,12 @@ with tab_closers:
         r_detail = detail_display[ detail_display["Closer (derived)"].astype(str).str.strip() == sel_r ].copy()
         r_detail = filter_detail(r_detail, mode_r)
         st.dataframe(r_detail[[c for c in DETAIL_COLS if c in r_detail.columns]], use_container_width=True, hide_index=True)
-        st.download_button(f"Download Raw CSV — {sel_r}",
-                           data=r_detail.to_csv(index=False).encode("utf-8"),
-                           file_name=f"sales_raw_{sel_r.replace(' ','_')}.csv", mime="text/csv")
+        st.download_button(
+            f"Download Raw CSV — {sel_r}",
+            data=r_detail.to_csv(index=False).encode("utf-8"),
+            file_name=f"sales_raw_{sel_r.replace(' ','_')}.csv",
+            mime="text/csv"
+        )
     else:
         st.info("No sales reps found.")
 
@@ -760,6 +990,8 @@ with tab_exports:
                            file_name="harvester_report.csv", mime="text/csv")
         st.download_button("Download Sales CSV", data=sales_display.to_csv(index=False).encode("utf-8"),
                            file_name="sales_report.csv", mime="text/csv")
+        st.download_button("Download Sources CSV", data=source_display.to_csv(index=False).encode("utf-8"),
+                           file_name="sources_report.csv", mime="text/csv")
         st.download_button("Download Company Total CSV", data=company_total_table.to_csv(index=False).encode("utf-8"),
                            file_name="company_total.csv", mime="text/csv")
     with colB:
@@ -767,12 +999,14 @@ with tab_exports:
             CompanyTotal=company_total_table,
             Harvester=harv_display,
             Sales=sales_display,
+            Sources=source_display,
             Detail=detail_display
         )
         st.download_button("Download Excel (All Sheets)", data=all_bytes,
                            file_name="weekly_reports.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+# Optional general page print (kept for convenience)
 st.write("")
 if st.button("Print Page"):
     components.html("<script>window.print();</script>", height=0)
