@@ -1,19 +1,6 @@
 {
-  "Sit": [
-    "Sit - No Sale",
-    "Sit - Pending",
-    "Sit - Sold"
-  ],
-  "Sold": [
-    "Signed Contract",
-    "Sit - Sold"
-  ],
-  "No Show": [
-    "No Show- H/O",
-    "NS",
-    "No-Show",
-    "NoShow",
-    "No Sit"
-  ],
-  "Set": []
+  "Sit": ["Sit - No Sale", "Sit - Pending", "Sit - Sold", "Sits", "Sit", "Sit – No Sale", "Sit – Pending", "Sit – Sold"],
+  "Sold": ["Signed Contract", "Sit - Sold", "Sold", "Sale", "Closed Won", "Closed", "Contract Signed", "Signed", "Agreement Signed"],
+  "No Show": ["No Show- H/O", "No Show", "No-Show", "NoShow", "NS", "No Sit"],
+  "Set": ["Set", "Appointment Set", "Appt Set", "Appointment Scheduled"]
 }
