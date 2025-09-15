@@ -794,8 +794,8 @@ st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
 # ---------- Tabs ----------
-tab_overview, tab_sources, tab_setters, tab_closers, tab_statuses, tab_detail, tab_audit, tab_exports = st.tabs(
-    ["📊 Overview", "📣 Sources", "🌱 Setters (Harvester)", "💼 Closers (Sales)", "📋 Statuses", "🧾 Detail", "📝 Audit", "⬇️ Export"]
+tab_overview, tab_sources, tab_setters, tab_closers, tab_statuses, tab_neal, tab_detail, tab_audit, tab_exports = st.tabs(
+    ["📊 Overview", "📣 Sources", "🌱 Setters (Harvester)", "💼 Closers (Sales)", "📋 Statuses", "💵 Neal’s Pay", "🧾 Detail", "📝 Audit", "⬇️ Export"]
 )
 
 with tab_overview:
@@ -838,7 +838,7 @@ with tab_overview:
                 "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
                 "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
                 "Add-on % of Sales": st.column_config.NumberColumn(format="%d%%"),
-                "Sales $": st.column_config.NumberColumn(format="$%.0f"),
+                "Sales $": st.column_config.NumberColumn(format("$%.0f")),
                 "Avg Sale $": st.column_config.NumberColumn(format("$%.0f")),
                 "Insul $": st.column_config.NumberColumn(format("$%.0f")),
                 "RB $":    st.column_config.NumberColumn(format("$%.0f")),
@@ -978,7 +978,7 @@ with tab_closers:
         }
     )
 
-# >>>>>>>>>>>>>>>>>>>>> NEW TAB: Statuses <<<<<<<<<<<<<<<<<<<<<<
+# >>>>>>>>>>>>>>>>>>>>> STATUS TAB <<<<<<<<<<<<<<<<<<<<<<
 with tab_statuses:
     st.subheader("Statuses — Count & Percent")
     total_rows = len(flag_df)
@@ -997,7 +997,6 @@ with tab_statuses:
         status_breakdown["Percent"] = status_breakdown["Count"].apply(
             lambda c: f"{(c/total_rows*100):.1f}%"
         )
-        # Optional TOTAL row (matches style in other tabs)
         total_row = pd.DataFrame([{
             "Status": "TOTAL",
             "Count": total_rows,
@@ -1020,6 +1019,65 @@ with tab_statuses:
             file_name="status_breakdown.csv",
             mime="text/csv"
         )
+
+# >>>>>>>>>>>>>>>>>>>>> NEAL'S PAY TAB <<<<<<<<<<<<<<<<<<<<<<
+with tab_neal:
+    st.subheader("Neal’s Pay Report")
+    sales_amount = totals.total_contract_amount
+    close_rate = totals.close_rate  # 0..1
+    insul_amount = totals.insul_cost_sum
+    rb_amount = totals.rb_cost_sum
+    addons_amount = insul_amount + rb_amount
+
+    base_rate = 0.005  # 0.5%
+    # Bonus: +0.5% if 35.00%–39.99%, +1.0% if ≥40.00%
+    if close_rate >= 0.40:
+        bonus_rate = 0.01
+    elif close_rate >= 0.35:
+        bonus_rate = 0.005
+    else:
+        bonus_rate = 0.0
+
+    commission_sales = (base_rate + bonus_rate) * sales_amount
+    commission_addons = 0.10 * addons_amount
+    total_pay = commission_sales + commission_addons
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Sales $", f"${sales_amount:,.0f}")
+        st.metric("Close %", f"{close_rate*100:,.2f}%")
+    with c2:
+        st.metric("Insulation $", f"${insul_amount:,.0f}")
+        st.metric("Radiant Barrier $", f"${rb_amount:,.0f}")
+    with c3:
+        st.metric("Base + Bonus Rate", f"{(base_rate+bonus_rate)*100:.2f}%")
+        st.metric("Add-ons %", "10.00%")
+
+    st.markdown("### Pay Breakdown")
+    pay_df = pd.DataFrame([
+        {"Component": "Commission on Sales $", "Rate": f"{(base_rate+bonus_rate)*100:.2f}%", "Amount": f"${commission_sales:,.0f}"},
+        {"Component": "Commission on Insulation + RB", "Rate": "10.00%", "Amount": f"${commission_addons:,.0f}"},
+        {"Component": "TOTAL PAY", "Rate": "", "Amount": f"${total_pay:,.0f}"},
+    ])
+    st.table(pay_df)
+
+    st.download_button(
+        "Download Neal Pay CSV",
+        data=pd.DataFrame([{
+            "Sales $": round(sales_amount,2),
+            "Close %": round(close_rate*100,2),
+            "Insulation $": round(insul_amount,2),
+            "Radiant Barrier $": round(rb_amount,2),
+            "Add-ons $": round(addons_amount,2),
+            "Base Rate %": 0.5,
+            "Bonus Rate %": 100*bonus_rate,
+            "Sales Commission $": round(commission_sales,2),
+            "Add-ons Commission $": round(commission_addons,2),
+            "Total Pay $": round(total_pay,2),
+        }]).to_csv(index=False).encode("utf-8"),
+        file_name="neal_pay_report.csv",
+        mime="text/csv"
+    )
 
 with tab_detail:
     st.subheader("Detail (with flags)")
