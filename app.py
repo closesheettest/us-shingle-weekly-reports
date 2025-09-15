@@ -978,6 +978,26 @@ with tab_closers:
         }
     )
 
+    # -------- NEW: Raw Line Items for a Sales Rep (like Harvester) --------
+    st.markdown("### Raw Line Items for a Sales Rep")
+    rep_list = safe_unique_sorted(sales_report["Sales Rep"])
+    if rep_list:
+        sel_r = st.selectbox("Choose Sales Rep", options=rep_list, key="rep_choice")
+        mode_r = st.radio("Filter:", ["All", "Only Sits (Sales)", "Only Sales", "Only No Shows"],
+                          horizontal=True, key="rep_mode")
+        r_all = detail_display[ detail_display["Closer (derived)"].astype(str).str.strip() == sel_r ].copy()
+        r_detail = filter_detail(r_all, mode_r)
+        st.dataframe(r_detail[[c for c in DETAIL_COLS if c in r_detail.columns]],
+                     use_container_width=True, hide_index=True)
+        st.download_button(
+            f"Download Raw CSV — {sel_r}",
+            data=r_detail.to_csv(index=False).encode("utf-8"),
+            file_name=f"sales_raw_{sel_r.replace(' ','_')}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("No sales reps found.")
+
 # >>>>>>>>>>>>>>>>>>>>> STATUS TAB <<<<<<<<<<<<<<<<<<<<<<
 with tab_statuses:
     st.subheader("Statuses — Count & Percent")
