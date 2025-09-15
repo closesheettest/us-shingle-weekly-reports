@@ -240,6 +240,13 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
         is_sale_from_amt = pd.to_numeric(out["Total Contract"], errors="coerce").fillna(0) > 0
     out["is_sale"] = is_sale_from_rule | (infer_sale_from_amount & is_sale_from_amt)
 
+    # --- NEVER treat "Sit-Pending" as Sale (case/punctuation/spacing-insensitive) ---
+    norm_status = status_clean.str.lower().str.replace(r"[^a-z]+", " ", regex=True).str.strip()
+    never_sale_mask = norm_status.eq("sit pending")
+    out.loc[never_sale_mask, "is_sale"] = False
+    out.loc[never_sale_mask, "is_sale_status"] = False
+    # -------------------------------------------------------------------------------
+
     # Sit flags (separate)
     out["is_sit_harv"]  = status_clean.isin(sit_harv_set)  | (count_sold_as_sit_harv  & out["is_sale"])
     out["is_sit_sales"] = status_clean.isin(sit_sales_set) | (count_sold_as_sit_sales & out["is_sale"])
@@ -263,9 +270,9 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
     has_rb_any    = (pd.to_numeric(rb_cost,  errors="coerce").fillna(0) > 0) | \
                     (pd.to_numeric(rb_sqft,  errors="coerce").fillna(0) > 0)
 
-    out["has_insul"]      = is_sale_status & has_insul_any
-    out["has_rb"]         = is_sale_status & has_rb_any
-    out["has_any_addon"]  = is_sale_status & (has_insul_any | has_rb_any)
+    out["has_insul"]      = out["is_sale_status"] & has_insul_any
+    out["has_rb"]         = out["is_sale_status"] & has_rb_any
+    out["has_any_addon"]  = out["is_sale_status"] & (has_insul_any | has_rb_any)
     return out
 
 # ---------- Totals & Reports ----------
@@ -808,8 +815,7 @@ with tab_overview:
             "Sit % (Sales)":     st.column_config.NumberColumn(format="%d%%"),
             "Close %":           st.column_config.NumberColumn(format="%d%%"),
             "Sales $":           st.column_config.NumberColumn(format="$%.0f"),
-            "Avg Sale $":        st.column_config.NumberColumn(format("$%.0f"),
-            ),
+            "Avg Sale $":        st.column_config.NumberColumn(format("$%.0f")),
             "Insul % of Sales":  st.column_config.NumberColumn(format="%d%%"),
             "RB % of Sales":     st.column_config.NumberColumn(format="%d%%"),
             "Add-on % of Sales": st.column_config.NumberColumn(format="%d%%"),
@@ -978,7 +984,7 @@ with tab_closers:
         }
     )
 
-    # -------- NEW: Raw Line Items for a Sales Rep (like Harvester) --------
+    # -------- Raw Line Items for a Sales Rep (like Harvester) --------
     st.markdown("### Raw Line Items for a Sales Rep")
     rep_list = safe_unique_sorted(sales_report["Sales Rep"])
     if rep_list:
@@ -1049,16 +1055,15 @@ with tab_neal:
     rb_amount = totals.rb_cost_sum
     addons_amount = insul_amount + rb_amount
 
-    base_rate = 0.005  # 0.5%
-    # Bonus: +0.5% if 35.00%–39.99%, +1.0% if ≥40.00%
+    # Sales commission rate based on close %
     if close_rate >= 0.40:
-        bonus_rate = 0.01
+        pay_rate = 0.015     # 1.5%
     elif close_rate >= 0.35:
-        bonus_rate = 0.005
+        pay_rate = 0.010     # 1.0%
     else:
-        bonus_rate = 0.0
+        pay_rate = 0.005     # 0.5%
 
-    commission_sales = (base_rate + bonus_rate) * sales_amount
+    commission_sales = pay_rate * sales_amount
     commission_addons = 0.10 * addons_amount
     total_pay = commission_sales + commission_addons
 
@@ -1070,12 +1075,12 @@ with tab_neal:
         st.metric("Insulation $", f"${insul_amount:,.0f}")
         st.metric("Radiant Barrier $", f"${rb_amount:,.0f}")
     with c3:
-        st.metric("Base + Bonus Rate", f"{(base_rate+bonus_rate)*100:.2f}%")
+        st.metric("Sales Commission Rate", f"{pay_rate*100:.2f}%")
         st.metric("Add-ons %", "10.00%")
 
     st.markdown("### Pay Breakdown")
     pay_df = pd.DataFrame([
-        {"Component": "Commission on Sales $", "Rate": f"{(base_rate+bonus_rate)*100:.2f}%", "Amount": f"${commission_sales:,.0f}"},
+        {"Component": "Commission on Sales $", "Rate": f"{pay_rate*100:.2f}%", "Amount": f"${commission_sales:,.0f}"},
         {"Component": "Commission on Insulation + RB", "Rate": "10.00%", "Amount": f"${commission_addons:,.0f}"},
         {"Component": "TOTAL PAY", "Rate": "", "Amount": f"${total_pay:,.0f}"},
     ])
@@ -1089,8 +1094,7 @@ with tab_neal:
             "Insulation $": round(insul_amount,2),
             "Radiant Barrier $": round(rb_amount,2),
             "Add-ons $": round(addons_amount,2),
-            "Base Rate %": 0.5,
-            "Bonus Rate %": 100*bonus_rate,
+            "Sales Commission Rate %": round(pay_rate*100,2),
             "Sales Commission $": round(commission_sales,2),
             "Add-ons Commission $": round(commission_addons,2),
             "Total Pay $": round(total_pay,2),
