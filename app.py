@@ -77,7 +77,6 @@ def build_printable_harvester_html(harvester_name: str, summary: dict, df: pd.Da
         except Exception:
             return "0%"
 
-    # ====== ONLY Appointments, Sits, Sit % (removed Sales, Close %, Sales $) ======
     html = f"""
 <!doctype html>
 <html>
@@ -108,6 +107,9 @@ def build_printable_harvester_html(harvester_name: str, summary: dict, df: pd.Da
     <div class="kpi"><div class="lbl">Appointments</div><div class="val">{summary.get('appointments',0):,}</div></div>
     <div class="kpi"><div class="lbl">Sits (Harvester)</div><div class="val">{summary.get('sits_harv',0):,}</div></div>
     <div class="kpi"><div class="lbl">Sit %</div><div class="val">{pct(summary.get('sit_rate_harv',0.0))}</div></div>
+    <div class="kpi"><div class="lbl">Sales</div><div class="val">{summary.get('sales',0):,}</div></div>
+    <div class="kpi"><div class="lbl">Close %</div><div class="val">{pct(summary.get('close_rate',0.0))}</div></div>
+    <div class="kpi"><div class="lbl">Sales $</div><div class="val">{_fmt_money(summary.get('sales_amt',0))}</div></div>
   </div>
   {table_html}
 </body>
@@ -635,7 +637,7 @@ check_df = pd.DataFrame({
     "No Show":         [s in rules.get("no_show", []) for s in present_statuses],
 })
 unclassified = check_df.loc[
-    ~(check_df["Sit (Harvester)"] | check_df["Sit (Sales)" ] | check_df["Sale"] | check_df["No Show"]),
+    ~(check_df["Sit (Harvester)"] | check_df["Sit (Sales)"] | check_df["Sale"] | check_df["No Show"]),
     "Status"
 ].tolist()
 if unclassified:
@@ -792,8 +794,8 @@ st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
 # ---------- Tabs ----------
-tab_overview, tab_sources, tab_setters, tab_closers, tab_detail, tab_audit, tab_exports = st.tabs(
-    ["📊 Overview", "📣 Sources", "🌱 Setters (Harvester)", "💼 Closers (Sales)", "🧾 Detail", "📝 Audit", "⬇️ Export"]
+tab_overview, tab_sources, tab_setters, tab_closers, tab_statuses, tab_detail, tab_audit, tab_exports = st.tabs(
+    ["📊 Overview", "📣 Sources", "🌱 Setters (Harvester)", "💼 Closers (Sales)", "📋 Statuses", "🧾 Detail", "📝 Audit", "⬇️ Export"]
 )
 
 with tab_overview:
@@ -976,23 +978,48 @@ with tab_closers:
         }
     )
 
-    st.markdown("### Raw Line Items for a Sales Rep")
-    rep_list = safe_unique_sorted(sales_report["Sales Rep"])
-    if rep_list:
-        sel_r = st.selectbox("Choose Sales Rep", options=rep_list, key="rep_choice")
-        mode_r = st.radio("Filter:", ["All", "Only Sits (Sales)", "Only Sales", "Only No Shows"],
-                          horizontal=True, key="rep_mode")
-        r_detail = detail_display[ detail_display["Closer (derived)"].astype(str).str.strip() == sel_r ].copy()
-        r_detail = filter_detail(r_detail, mode_r)
-        st.dataframe(r_detail[[c for c in DETAIL_COLS if c in r_detail.columns]], use_container_width=True, hide_index=True)
+# >>>>>>>>>>>>>>>>>>>>> NEW TAB: Statuses <<<<<<<<<<<<<<<<<<<<<<
+with tab_statuses:
+    st.subheader("Statuses — Count & Percent")
+    total_rows = len(flag_df)
+    if total_rows == 0:
+        st.info("No rows to summarize.")
+    else:
+        status_breakdown = (
+            flag_df["Status"]
+            .astype(str)
+            .str.strip()
+            .replace("", "<Blank>")
+            .value_counts(dropna=False)
+            .rename_axis("Status")
+            .reset_index(name="Count")
+        )
+        status_breakdown["Percent"] = status_breakdown["Count"].apply(
+            lambda c: f"{(c/total_rows*100):.1f}%"
+        )
+        # Optional TOTAL row (matches style in other tabs)
+        total_row = pd.DataFrame([{
+            "Status": "TOTAL",
+            "Count": total_rows,
+            "Percent": "100.0%"
+        }])
+        status_display = pd.concat([status_breakdown, total_row], ignore_index=True)
+
+        st.dataframe(
+            status_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Count": st.column_config.NumberColumn(format="%.0f"),
+                "Percent": st.column_config.TextColumn(),
+            }
+        )
         st.download_button(
-            f"Download Raw CSV — {sel_r}",
-            data=r_detail.to_csv(index=False).encode("utf-8"),
-            file_name=f"sales_raw_{sel_r.replace(' ','_')}.csv",
+            "Download Status Breakdown CSV",
+            data=status_display.to_csv(index=False).encode("utf-8"),
+            file_name="status_breakdown.csv",
             mime="text/csv"
         )
-    else:
-        st.info("No sales reps found.")
 
 with tab_detail:
     st.subheader("Detail (with flags)")
