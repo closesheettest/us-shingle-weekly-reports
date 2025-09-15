@@ -77,6 +77,7 @@ def build_printable_harvester_html(harvester_name: str, summary: dict, df: pd.Da
         except Exception:
             return "0%"
 
+    # ====== ONLY Appointments, Sits, Sit % (removed Sales, Close %, Sales $) ======
     html = f"""
 <!doctype html>
 <html>
@@ -107,9 +108,6 @@ def build_printable_harvester_html(harvester_name: str, summary: dict, df: pd.Da
     <div class="kpi"><div class="lbl">Appointments</div><div class="val">{summary.get('appointments',0):,}</div></div>
     <div class="kpi"><div class="lbl">Sits (Harvester)</div><div class="val">{summary.get('sits_harv',0):,}</div></div>
     <div class="kpi"><div class="lbl">Sit %</div><div class="val">{pct(summary.get('sit_rate_harv',0.0))}</div></div>
-    <div class="kpi"><div class="lbl">Sales</div><div class="val">{summary.get('sales',0):,}</div></div>
-    <div class="kpi"><div class="lbl">Close %</div><div class="val">{pct(summary.get('close_rate',0.0))}</div></div>
-    <div class="kpi"><div class="lbl">Sales $</div><div class="val">{_fmt_money(summary.get('sales_amt',0))}</div></div>
   </div>
   {table_html}
 </body>
@@ -637,7 +635,7 @@ check_df = pd.DataFrame({
     "No Show":         [s in rules.get("no_show", []) for s in present_statuses],
 })
 unclassified = check_df.loc[
-    ~(check_df["Sit (Harvester)"] | check_df["Sit (Sales)"] | check_df["Sale"] | check_df["No Show"]),
+    ~(check_df["Sit (Harvester)"] | check_df["Sit (Sales)" ] | check_df["Sale"] | check_df["No Show"]),
     "Status"
 ].tolist()
 if unclassified:
