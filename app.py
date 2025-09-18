@@ -59,7 +59,7 @@ def build_printable_harvester_html(harvester_name: str, summary: dict, df: pd.Da
 
     if "Total Contract" in table.columns:
         table["Total Contract"] = table["Total Contract"].map(_fmt_money)
-    for bcol, label in [("is_sit_harv","Sit (Harvester)"), ("is_sale","Sale"), ("is_noshow","No Show")]:
+    for bcol, label in [("is_sit_harv","Sit (Harvester)"), ("is_sale_status","Sale"), ("is_noshow","No Show"):]:
         if bcol in table.columns:
             table[label] = table[bcol].map(lambda v: "✓" if bool(v) else "")
             table.drop(columns=[bcol], inplace=True)
@@ -260,8 +260,8 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
     # -------------------------------------------------------------------------------
 
     # Sit flags (separate)
-    out["is_sit_harv"]  = status_clean.isin(sit_harv_set)  | (count_sold_as_sit_harv  & out["is_sale"])
-    out["is_sit_sales"] = status_clean.isin(sit_sales_set) | (count_sold_as_sit_sales & out["is_sale"])
+    out["is_sit_harv"]  = status_clean.isin(sit_harv_set)  | (count_sold_as_sit_harv  & out["is_sale_status"])
+    out["is_sit_sales"] = status_clean.isin(sit_sales_set) | (count_sold_as_sit_sales & out["is_sale_status"])
 
     # No Show
     out["is_noshow"] = status_clean.isin(noshow_set)
@@ -295,22 +295,25 @@ def compute_totals(flag_df: pd.DataFrame) -> Totals:
     total_appts = int(len(flag_df))
     sits_harv   = int(flag_df["is_sit_harv"].sum())
     sits_sales  = int(flag_df["is_sit_sales"].sum())
-    total_sales = int(flag_df["is_sale"].sum())  # may include $>0 inference
-    strict_sales = int(flag_df.get("is_sale_status", pd.Series(False, index=flag_df.index)).sum())
+    strict_sales_mask = flag_df.get("is_sale_status", pd.Series(False, index=flag_df.index)).astype(bool)
+    total_sales = int(strict_sales_mask.sum())
+    strict_sales = total_sales
     total_noshow = int(flag_df["is_noshow"].sum())
 
     # $ only from strict sale status
-    sale_mask = flag_df.get("is_sale_status", pd.Series(False, index=flag_df.index)).astype(bool)
-    sales_amt = float(flag_df.loc[sale_mask, "Total Contract"].sum()) if "Total Contract" in flag_df.columns else 0.0
+    sale_mask = strict_sales_mask
+    credit_deny_mask = flag_df["Status"].astype(str).str.strip().str.lower().eq("credit denial")
+    credit_deny_mask = flag_df["Status"].astype(str).str.strip().str.lower() == "credit denial"
+    sales_amt = float(flag_df.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in flag_df.columns else 0.0
 
     # Insul/RB already gated by strict status via build_flags
     sales_with_insul = int(flag_df["has_insul"].sum())
     sales_with_rb    = int(flag_df["has_rb"].sum())
     sales_with_addon = int(flag_df["has_any_addon"].sum())
 
-    insul_cost_sum = float(flag_df.loc[flag_df["has_insul"], "Insulation Cost"].sum()) if "Insulation Cost" in flag_df.columns else 0.0
+    insul_cost_sum = float(flag_df.loc[flag_df["has_insul"] & ~credit_deny_mask, "Insulation Cost"].sum()) if "Insulation Cost" in flag_df.columns else 0.0
     insul_sqft_sum = float(flag_df.loc[flag_df["has_insul"], "Insulation Sqft"].sum()) if "Insulation Sqft" in flag_df.columns else 0.0
-    rb_cost_sum    = float(flag_df.loc[flag_df["has_rb"], "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in flag_df.columns else 0.0
+    rb_cost_sum    = float(flag_df.loc[flag_df["has_rb"] & ~credit_deny_mask, "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in flag_df.columns else 0.0
     rb_sqft_sum    = float(flag_df.loc[flag_df["has_rb"], "Radiant Barrier Sqft"].sum()) if "Radiant Barrier Sqft" in flag_df.columns else 0.0
 
     sit_rate_harv  = (sits_harv / total_appts) if total_appts else 0.0
@@ -353,20 +356,21 @@ def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame
     def row(g: pd.DataFrame):
         appts = len(g)
         sits  = int(g["is_sit_sales"].sum())
-        sales = int(g["is_sale"].sum())  # may include $>0 inference
+        sales = int(sale_mask.sum())
 
         # Strict sale mask for $ and avg
         sale_mask = g.get("is_sale_status", pd.Series(False, index=g.index)).astype(bool)
-        sales_amt = float(g.loc[sale_mask, "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
+        credit_deny_mask = g["Status"].astype(str).str.strip().str.lower() == "credit denial"
+        sales_amt = float(g.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
         strict_sales = int(sale_mask.sum())
 
         sales_with_insul = int(g["has_insul"].sum())
         sales_with_rb    = int(g["has_rb"].sum())
         sales_with_addon = int(g["has_any_addon"].sum())
 
-        insul_cost_sum = float(g.loc[g["has_insul"], "Insulation Cost"].sum()) if "Insulation Cost" in g.columns else 0.0
+        insul_cost_sum = float(g.loc[g["has_insul"] & ~credit_deny_mask, "Insulation Cost"].sum()) if "Insulation Cost" in g.columns else 0.0
         insul_sqft_sum = float(g.loc[g["has_insul"], "Insulation Sqft"].sum()) if "Insulation Sqft" in g.columns else 0.0
-        rb_cost_sum    = float(g.loc[g["has_rb"], "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in g.columns else 0.0
+        rb_cost_sum    = float(g.loc[g["has_rb"] & ~credit_deny_mask, "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in g.columns else 0.0
         rb_sqft_sum    = float(g.loc[g["has_rb"], "Radiant Barrier Sqft"].sum()) if "Radiant Barrier Sqft" in g.columns else 0.0
 
         return pd.DataFrame([{
@@ -404,18 +408,19 @@ def compute_source_report(flag_df: pd.DataFrame, source_col: str = "Source", sit
     def row(g: pd.DataFrame):
         appts = len(g)
         sits  = int(g[sit_flag].sum())
-        sales = int(g["is_sale"].sum())  # may include $>0 inference
+        sales = int(sale_mask.sum())
 
         sale_mask = g.get("is_sale_status", pd.Series(False, index=g.index)).astype(bool)
-        sales_amt = float(g.loc[sale_mask, "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
+        credit_deny_mask = g["Status"].astype(str).str.strip().str.lower() == "credit denial"
+        sales_amt = float(g.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
         strict_sales = int(sale_mask.sum())
 
         sales_with_insul = int(g["has_insul"].sum())
         sales_with_rb    = int(g["has_rb"].sum())
         sales_with_addon = int(g["has_any_addon"].sum())
 
-        insul_cost_sum = float(g.loc[g["has_insul"], "Insulation Cost"].sum()) if "Insulation Cost" in g.columns else 0.0
-        rb_cost_sum    = float(g.loc[g["has_rb"], "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in g.columns else 0.0
+        insul_cost_sum = float(g.loc[g["has_insul"] & ~credit_deny_mask, "Insulation Cost"].sum()) if "Insulation Cost" in g.columns else 0.0
+        rb_cost_sum    = float(g.loc[g["has_rb"] & ~credit_deny_mask, "Radiant Barrier Cost"].sum()) if "Radiant Barrier Cost" in g.columns else 0.0
 
         return pd.DataFrame([{
             "Appointments": appts,
@@ -492,7 +497,7 @@ def pct_to_int(df: pd.DataFrame, cols) -> pd.DataFrame:
 def filter_detail(df: pd.DataFrame, mode: str) -> pd.DataFrame:
     if mode == "Only Sits (Harvester)": return df[df["is_sit_harv"]]
     if mode == "Only Sits (Sales)": return df[df["is_sit_sales"]]
-    if mode == "Only Sales": return df[df["is_sale"]]
+    if mode == "Only Sales": return df[df.get("is_sale_status", False)]
     if mode == "Only No Shows": return df[df["is_noshow"]]
     return df
 
@@ -787,7 +792,7 @@ DETAIL_COLS = [
     "Override To Sit","Override Note"
 ]
 detail_display = flag_df.copy()
-for col in ["is_sit_harv","is_sit_sales","is_sale","is_noshow","has_insul","has_rb","has_any_addon"]:
+for col in ["is_sit_harv","is_sit_sales","is_sale","is_sale_status","is_noshow","has_insul","has_rb","has_any_addon"]:
     if col in detail_display.columns:
         detail_display[col] = detail_display[col].astype(bool)
 
@@ -891,7 +896,7 @@ with tab_sources:
 
         s_detail = detail_display[ detail_display["Source"].astype(str).str.strip() == sel_s ].copy()
         if mode_s == "Only Sales":
-            s_detail = s_detail[s_detail["is_sale"]]
+            s_detail = s_detail[s_detail.get("is_sale_status", False)]
         elif mode_s == "Only No Shows":
             s_detail = s_detail[s_detail["is_noshow"]]
         elif mode_s != "All":
@@ -929,9 +934,10 @@ with tab_setters:
             apps = int(len(h_all))
             sits_h = int(h_all["is_sit_harv"].sum()) if "is_sit_harv" in h_all.columns else 0
             sits_s = int(h_all["is_sit_sales"].sum()) if "is_sit_sales" in h_all.columns else 0
-            sales_n = int(h_all["is_sale"].sum()) if "is_sale" in h_all.columns else 0
             sale_mask = h_all.get("is_sale_status", pd.Series(False, index=h_all.index)).astype(bool)
-            sales_amt = float(h_all.loc[sale_mask, "Total Contract"].sum()) if "Total Contract" in h_all.columns else 0.0
+            sales_n = int(sale_mask.sum())
+            credit_deny_mask = h_all["Status"].astype(str).str.strip().str.lower() == "credit denial"
+            sales_amt = float(h_all.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in h_all.columns else 0.0
             sit_rate_h = (sits_h / apps) if apps else 0.0
             close_rate = (sales_n / sits_s) if sits_s else 0.0
         except Exception:
