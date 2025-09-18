@@ -1,11 +1,12 @@
 
-# app.py — US Shingle Weekly Reports (fixed)
+# app.py — US Shingle Weekly Reports (Gross vs Net Close %)
 # - $ amounts only count when Status is classified as **Sale** (strict)
 # - Status Rules editor lists ONLY statuses in current file; auto-save merges into status_rules.json
 # - Overrides: "Override to Sit" affects HARVESTER ONLY (does NOT affect Sales-side sits)
 # - Insulation/Radiant Barrier are attributes of sales (not extra sales)
 # - Sources report + exports
 # - Printable Harvester report with overrides & notes
+# - NEW: "Gross Close %" (strict sale-status / sits) and "Net Close %" (only sales that collected money / sits)
 
 from __future__ import annotations  # avoids NameError on type hints at import time
 
@@ -30,7 +31,7 @@ def safe_rerun():
 # ---------- Simple styling ----------
 st.markdown("""
 <style>
-.kpi-row { display:grid; grid-template-columns:repeat(7,minmax(120px,1fr)); gap:12px; }
+.kpi-row { display:grid; grid-template-columns:repeat(8,minmax(120px,1fr)); gap:12px; }
 .kpi-card { background:#ffffff10; border:1px solid rgba(120,120,120,.15); border-radius:16px; padding:16px 14px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
 .kpi-label { font-size:12px; color:#6b7280; text-transform:uppercase; letter-spacing:.04em; }
 .kpi-value { font-size:22px; font-weight:700; margin-top:4px; }
@@ -60,7 +61,6 @@ def build_printable_harvester_html(harvester_name: str, summary: dict, df: pd.Da
 
     if "Total Contract" in table.columns:
         table["Total Contract"] = table["Total Contract"].map(_fmt_money)
-    # FIX: removed stray colon in list literal
     for bcol, label in [("is_sit_harv","Sit (Harvester)"), ("is_sale_status","Sale"), ("is_noshow","No Show")]:
         if bcol in table.columns:
             table[label] = table[bcol].map(lambda v: "✓" if bool(v) else "")
@@ -110,7 +110,7 @@ def build_printable_harvester_html(harvester_name: str, summary: dict, df: pd.Da
     <div class="kpi"><div class="lbl">Sits (Harvester)</div><div class="val">{summary.get('sits_harv',0):,}</div></div>
     <div class="kpi"><div class="lbl">Sit %</div><div class="val">{pct(summary.get('sit_rate_harv',0.0))}</div></div>
     <div class="kpi"><div class="lbl">Sales</div><div class="val">{summary.get('sales',0):,}</div></div>
-    <div class="kpi"><div class="lbl">Close %</div><div class="val">{pct(summary.get('close_rate',0.0))}</div></div>
+    <div class="kpi"><div class="lbl">Gross Close %</div><div class="val">{pct(summary.get('gross_close_rate',0.0))}</div></div>
     <div class="kpi"><div class="lbl">Sales $</div><div class="val">{_fmt_money(summary.get('sales_amt',0))}</div></div>
   </div>
   {table_html}
@@ -249,10 +249,10 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
     if "Total Contract" in out.columns:
         is_sale_from_amt = pd.to_numeric(out["Total Contract"], errors="coerce").fillna(0) > 0
 
-    # Final sale flag
+    # Final sale flag:
     out["is_sale"] = is_sale_status | (infer_sale_from_amount & is_unclassified & is_sale_from_amt)
 
-    # --- NEVER treat "Sit-Pending" as Sale ---
+    # NEVER treat "Sit-Pending" as Sale
     norm_status = status_clean.str.lower().str.replace(r"[^a-z]+", " ", regex=True).str.strip()
     never_sale_mask = norm_status.eq("sit pending")
     out.loc[never_sale_mask, "is_sale"] = False
@@ -276,8 +276,10 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
     rb_cost    = out.get("Radiant Barrier Cost", pd.Series(0, index=out.index))
     rb_sqft    = out.get("Radiant Barrier Sqft", pd.Series(0, index=out.index))
 
-    has_insul_any = (pd.to_numeric(insul_cost, errors="coerce").fillna(0) > 0) |                     (pd.to_numeric(insul_sqft, errors="coerce").fillna(0) > 0)
-    has_rb_any    = (pd.to_numeric(rb_cost,  errors="coerce").fillna(0) > 0) |                     (pd.to_numeric(rb_sqft,  errors="coerce").fillna(0) > 0)
+    has_insul_any = (pd.to_numeric(insul_cost, errors="coerce").fillna(0) > 0) | \
+                    (pd.to_numeric(insul_sqft, errors="coerce").fillna(0) > 0)
+    has_rb_any    = (pd.to_numeric(rb_cost,  errors="coerce").fillna(0) > 0) | \
+                    (pd.to_numeric(rb_sqft,  errors="coerce").fillna(0) > 0)
 
     out["has_insul"]      = out["is_sale_status"] & has_insul_any
     out["has_rb"]         = out["is_sale_status"] & has_rb_any
@@ -293,14 +295,16 @@ def compute_totals(flag_df: pd.DataFrame) -> Totals:
     sits_harv   = int(flag_df["is_sit_harv"].sum())
     sits_sales  = int(flag_df["is_sit_sales"].sum())
     strict_sales_mask = flag_df.get("is_sale_status", pd.Series(False, index=flag_df.index)).astype(bool)
-    total_sales = int(strict_sales_mask.sum())
-    strict_sales = total_sales
+    total_sales = int(strict_sales_mask.sum())  # gross sales (strict status)
     total_noshow = int(flag_df["is_noshow"].sum())
 
-    # $ only from strict sale status
-    sale_mask = strict_sales_mask
+    # Net sales: strict sale-status AND money collected (exclude "Credit Denial")
     credit_deny_mask = flag_df["Status"].astype(str).str.strip().str.lower() == "credit denial"
-    sales_amt = float(flag_df.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in flag_df.columns else 0.0
+    net_sales_mask = strict_sales_mask & ~credit_deny_mask
+    net_sales = int(net_sales_mask.sum())
+
+    # $ only from net sales (same rule you use for $ sums)
+    sales_amt = float(flag_df.loc[net_sales_mask, "Total Contract"].sum()) if "Total Contract" in flag_df.columns else 0.0
 
     # Insul/RB already gated by strict status via build_flags
     sales_with_insul = int(flag_df["has_insul"].sum())
@@ -314,23 +318,26 @@ def compute_totals(flag_df: pd.DataFrame) -> Totals:
 
     sit_rate_harv  = (sits_harv / total_appts) if total_appts else 0.0
     sit_rate_sales = (sits_sales / total_appts) if total_appts else 0.0
-    close_rate     = (total_sales / sits_sales) if sits_sales else 0.0
-    sales_rate_appt= (total_sales / total_appts) if total_appts else 0.0
 
-    # Avg Sale $ uses strict sale count
-    avg_sale       = (sales_amt / strict_sales) if strict_sales else 0.0
+    gross_close_rate = (total_sales / sits_sales) if sits_sales else 0.0
+    net_close_rate   = (net_sales   / sits_sales) if sits_sales else 0.0
+    sales_rate_appt  = (total_sales / total_appts) if total_appts else 0.0
 
-    insul_pct = (sales_with_insul / strict_sales) if strict_sales else 0.0
-    rb_pct    = (sales_with_rb    / strict_sales) if strict_sales else 0.0
-    addon_pct = (sales_with_addon / strict_sales) if strict_sales else 0.0
+    # Avg Sale $ uses NET sales (matches $ summing logic)
+    avg_sale       = (sales_amt / net_sales) if net_sales else 0.0
+
+    insul_pct = (sales_with_insul / total_sales) if total_sales else 0.0
+    rb_pct    = (sales_with_rb    / total_sales) if total_sales else 0.0
+    addon_pct = (sales_with_addon / total_sales) if total_sales else 0.0
 
     return Totals(
         total_appointments=total_appts,
         sits_harv=sits_harv, sits_sales=sits_sales,
-        total_sales=total_sales, total_no_shows=total_noshow,
+        total_sales=total_sales, net_sales=net_sales, total_no_shows=total_noshow,
         total_contract_amount=round(sales_amt, 2),
         sit_rate_harv=sit_rate_harv, sit_rate_sales=sit_rate_sales,
-        close_rate=close_rate, sales_rate_appt=sales_rate_appt, avg_sale=round(avg_sale, 2),
+        gross_close_rate=gross_close_rate, net_close_rate=net_close_rate,
+        sales_rate_appt=sales_rate_appt, avg_sale=round(avg_sale, 2),
         sales_with_insul=sales_with_insul, sales_with_rb=sales_with_rb, sales_with_addon=sales_with_addon,
         insul_cost_sum=insul_cost_sum, insul_sqft_sum=insul_sqft_sum, rb_cost_sum=rb_cost_sum, rb_sqft_sum=rb_sqft_sum,
         insul_pct=insul_pct, rb_pct=rb_pct, addon_pct=addon_pct,
@@ -353,13 +360,13 @@ def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame
         appts = len(g)
         sits  = int(g["is_sit_sales"].sum())
 
-        # FIX: define sale_mask BEFORE using it
         sale_mask = g.get("is_sale_status", pd.Series(False, index=g.index)).astype(bool)
-        sales = int(sale_mask.sum())
-
         credit_deny_mask = g["Status"].astype(str).str.strip().str.lower() == "credit denial"
+
+        gross_sales = int(sale_mask.sum())
+        net_sales   = int((sale_mask & ~credit_deny_mask).sum())
+
         sales_amt = float(g.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
-        strict_sales = int(sale_mask.sum())
 
         sales_with_insul = int(g["has_insul"].sum())
         sales_with_rb    = int(g["has_rb"].sum())
@@ -374,23 +381,25 @@ def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame
             "Appointments": appts,
             "Sits": sits,
             "Sit %": (sits / appts) if appts else 0.0,
-            "Sales": sales,
-            "Close %": (sales / sits) if sits else 0.0,
+            "Sales (Gross)": gross_sales,
+            "Sales (Net)": net_sales,
+            "Gross Close %": (gross_sales / sits) if sits else 0.0,
+            "Net Close %": (net_sales / sits) if sits else 0.0,
             "Sales $": sales_amt,
-            "Avg Sale $": (sales_amt / strict_sales) if strict_sales else 0.0,
+            "Avg Sale $": (sales_amt / net_sales) if net_sales else 0.0,
 
             "Sales with Insulation #": sales_with_insul,
-            "Insul % of Sales": (sales_with_insul / strict_sales) if strict_sales else 0.0,
+            "Insul % of Sales": (sales_with_insul / gross_sales) if gross_sales else 0.0,
             "Insul $": insul_cost_sum,
             "Insul Sqft": insul_sqft_sum,
 
             "Sales with RB #": sales_with_rb,
-            "RB % of Sales": (sales_with_rb / strict_sales) if strict_sales else 0.0,
+            "RB % of Sales": (sales_with_rb / gross_sales) if gross_sales else 0.0,
             "RB $": rb_cost_sum,
             "RB Sqft": rb_sqft_sum,
 
             "Sales with Add-on #": sales_with_addon,
-            "Add-on % of Sales": (sales_with_addon / strict_sales) if strict_sales else 0.0,
+            "Add-on % of Sales": (sales_with_addon / gross_sales) if gross_sales else 0.0,
         }])
 
     rep = df.groupby(closer_col, dropna=False).apply(row).reset_index(level=1, drop=True).reset_index().rename(columns={closer_col: "Sales Rep"})
@@ -406,13 +415,13 @@ def compute_source_report(flag_df: pd.DataFrame, source_col: str = "Source", sit
         appts = len(g)
         sits  = int(g[sit_flag].sum())
 
-        # FIX: define sale_mask BEFORE using it
         sale_mask = g.get("is_sale_status", pd.Series(False, index=g.index)).astype(bool)
-        sales = int(sale_mask.sum())
-
         credit_deny_mask = g["Status"].astype(str).str.strip().str.lower() == "credit denial"
+
+        gross_sales = int(sale_mask.sum())
+        net_sales   = int((sale_mask & ~credit_deny_mask).sum())
+
         sales_amt = float(g.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
-        strict_sales = int(sale_mask.sum())
 
         sales_with_insul = int(g["has_insul"].sum())
         sales_with_rb    = int(g["has_rb"].sum())
@@ -425,21 +434,23 @@ def compute_source_report(flag_df: pd.DataFrame, source_col: str = "Source", sit
             "Appointments": appts,
             "Sits": sits,
             "Sit %": (sits / appts) if appts else 0.0,
-            "Sales": sales,
-            "Close %": (sales / sits) if sits else 0.0,
+            "Sales (Gross)": gross_sales,
+            "Sales (Net)": net_sales,
+            "Gross Close %": (gross_sales / sits) if sits else 0.0,
+            "Net Close %": (net_sales / sits) if sits else 0.0,
             "Sales $": sales_amt,
-            "Avg Sale $": (sales_amt / strict_sales) if strict_sales else 0.0,
+            "Avg Sale $": (sales_amt / net_sales) if net_sales else 0.0,
 
             "Sales with Insulation #": sales_with_insul,
-            "Insul % of Sales": (sales_with_insul / strict_sales) if strict_sales else 0.0,
+            "Insul % of Sales": (sales_with_insul / gross_sales) if gross_sales else 0.0,
             "Insul $": insul_cost_sum,
 
             "Sales with RB #": sales_with_rb,
-            "RB % of Sales": (sales_with_rb / strict_sales) if strict_sales else 0.0,
+            "RB % of Sales": (sales_with_rb / gross_sales) if gross_sales else 0.0,
             "RB $": rb_cost_sum,
 
             "Sales with Add-on #": sales_with_addon,
-            "Add-on % of Sales": (sales_with_addon / strict_sales) if strict_sales else 0.0,
+            "Add-on % of Sales": (sales_with_addon / gross_sales) if gross_sales else 0.0,
         }])
 
     rep = df.groupby(source_col, dropna=False).apply(row).reset_index(level=1, drop=True).reset_index().rename(columns={source_col: "Source"})
@@ -452,8 +463,10 @@ def company_totals_row(flag_df: pd.DataFrame):
         "Appointments": t.total_appointments,
         "Sits": t.sits_sales,
         "Sit %": t.sit_rate_sales,
-        "Sales": t.total_sales,
-        "Close %": t.close_rate,
+        "Sales (Gross)": t.total_sales,
+        "Sales (Net)": t.net_sales,
+        "Gross Close %": t.gross_close_rate,
+        "Net Close %": t.net_close_rate,
         "Sales $": t.total_contract_amount,
         "Avg Sale $": t.avg_sale,
 
@@ -635,10 +648,10 @@ with st.sidebar.expander("Click to review & edit status rules", expanded=True):
     c1, c2 = st.columns(2)
     with c1:
         f_harv = st.checkbox("Sit (Harvester)", value=cur["harv"], key="q_harv")
-        f_sales = st.checkbox("Sit (Sales)", value=cur["sales"], key="q_sales")
+        f_sales = st.checkbox("Sit (Sales)", value=cur["sales"], key="q_qsales")
     with c2:
-        f_sale = st.checkbox("Sale", value=cur["sale"], key="q_sale")
-        f_ns = st.checkbox("No Show", value=cur["no_show"], key="q_ns")
+        f_sale = st.checkbox("Sale", value=cur["sale"], key="q_qsale")
+        f_ns = st.checkbox("No Show", value=cur["no_show"], key="q_qns")
     if st.button("Save this status"):
         tmp_df = pd.DataFrame([{
             "Status": pick,
@@ -740,8 +753,10 @@ source_total_row = {
     "Appointments": src_tot.total_appointments,
     "Sits": src_tot.sits_sales if sit_mode_key == "sales" else src_tot.sits_harv,
     "Sit %": src_tot.sit_rate_sales if sit_mode_key == "sales" else src_tot.sit_rate_harv,
-    "Sales": src_tot.total_sales,
-    "Close %": src_tot.close_rate,
+    "Sales (Gross)": src_tot.total_sales,
+    "Sales (Net)": src_tot.net_sales,
+    "Gross Close %": src_tot.gross_close_rate,
+    "Net Close %": src_tot.net_close_rate,
     "Sales $": src_tot.total_contract_amount,
     "Avg Sale $": src_tot.avg_sale,
     "Sales with Insulation #": src_tot.sales_with_insul,
@@ -757,8 +772,8 @@ source_with_total = pd.concat([source_report, pd.DataFrame([source_total_row])],
 
 # Display-friendly % (whole numbers)
 harv_display   = pct_to_int(harvester_with_total, ["Sit %"])
-sales_display  = pct_to_int(sales_with_total, ["Sit %","Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"])
-source_display = pct_to_int(source_with_total,    ["Sit %","Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"])
+sales_display  = pct_to_int(sales_with_total, ["Sit %","Gross Close %","Net Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"])
+source_display = pct_to_int(source_with_total,    ["Sit %","Gross Close %","Net Close %","Insul % of Sales","RB % of Sales","Add-on % of Sales"])
 
 # Company Total (single-row)
 company_total_table = pd.DataFrame([{
@@ -767,8 +782,10 @@ company_total_table = pd.DataFrame([{
     "Sit % (Harvester)": int(round(totals.sit_rate_harv * 100, 0)),
     "Sits (Sales)": totals.sits_sales,
     "Sit % (Sales)": int(round(totals.sit_rate_sales * 100, 0)),
-    "Sales": totals.total_sales,
-    "Close %": int(round(totals.close_rate * 100, 0)),
+    "Sales (Gross)": totals.total_sales,
+    "Sales (Net)": totals.net_sales,
+    "Gross Close %": int(round(totals.gross_close_rate * 100, 0)),
+    "Net Close %": int(round(totals.net_close_rate * 100, 0)),
     "Sales $": totals.total_contract_amount,
     "Avg Sale $": totals.avg_sale,
     "Sales with Insulation #": totals.sales_with_insul,
@@ -806,8 +823,9 @@ kpis = [
     ("Appointments", f"{totals.total_appointments:,}"),
     ("Sits (Harvester)", f"{totals.sits_harv:,}"),
     ("Sit % (Harvester)", f"{totals.sit_rate_harv:.0%}"),
-    ("Sales", f"{totals.total_sales:,}"),
-    ("Close %", f"{totals.close_rate:.0%}"),
+    ("Sales (Gross)", f"{totals.total_sales:,}"),
+    ("Gross Close %", f"{totals.gross_close_rate:.0%}"),
+    ("Net Close %", f"{totals.net_close_rate:.0%}"),
     ("Sales $", f"${totals.total_contract_amount:,.0f}"),
     ("Avg Sale $", f"${totals.avg_sale:,.0f}"),
 ]
@@ -829,7 +847,8 @@ with tab_overview:
         column_config={
             "Sit % (Harvester)": st.column_config.NumberColumn(format="%d%%"),
             "Sit % (Sales)":     st.column_config.NumberColumn(format="%d%%"),
-            "Close %":           st.column_config.NumberColumn(format="%d%%"),
+            "Gross Close %":     st.column_config.NumberColumn(format="%d%%"),
+            "Net Close %":       st.column_config.NumberColumn(format="%d%%"),
             "Sales $":           st.column_config.NumberColumn(format="$%.0f"),
             "Avg Sale $":        st.column_config.NumberColumn(format("$%.0f")),
             "Insul % of Sales":  st.column_config.NumberColumn(format="%d%%"),
@@ -855,15 +874,16 @@ with tab_overview:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Sit %":   st.column_config.NumberColumn(format="%d%%"),
-                "Close %": st.column_config.NumberColumn(format="%d%%"),
+                "Sit %":            st.column_config.NumberColumn(format="%d%%"),
+                "Gross Close %":    st.column_config.NumberColumn(format="%d%%"),
+                "Net Close %":      st.column_config.NumberColumn(format="%d%%"),
                 "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
                 "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
                 "Add-on % of Sales": st.column_config.NumberColumn(format="%d%%"),
-                "Sales $": st.column_config.NumberColumn(format("$%.0f")),
-                "Avg Sale $": st.column_config.NumberColumn(format("$%.0f")),
-                "Insul $": st.column_config.NumberColumn(format("$%.0f")),
-                "RB $":    st.column_config.NumberColumn(format("$%.0f")),
+                "Sales $":          st.column_config.NumberColumn(format("$%.0f")),
+                "Avg Sale $":       st.column_config.NumberColumn(format("$%.0f")),
+                "Insul $":          st.column_config.NumberColumn(format("$%.0f")),
+                "RB $":             st.column_config.NumberColumn(format("$%.0f")),
             }
         )
 
@@ -873,15 +893,16 @@ with tab_sources:
     st.dataframe(
         source_display, use_container_width=True, hide_index=True,
         column_config={
-            "Sit %":   st.column_config.NumberColumn(format="%d%%"),
-            "Close %": st.column_config.NumberColumn(format="%d%%"),
+            "Sit %":            st.column_config.NumberColumn(format="%d%%"),
+            "Gross Close %":    st.column_config.NumberColumn(format="%d%%"),
+            "Net Close %":      st.column_config.NumberColumn(format="%d%%"),
             "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
             "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
             "Add-on % of Sales": st.column_config.NumberColumn(format="%d%%"),
-            "Sales $": st.column_config.NumberColumn(format("$%.0f")),
-            "Avg Sale $": st.column_config.NumberColumn(format("$%.0f")),
-            "Insul $": st.column_config.NumberColumn(format("$%.0f")),
-            "RB $":    st.column_config.NumberColumn(format("$%.0f")),
+            "Sales $":          st.column_config.NumberColumn(format("$%.0f")),
+            "Avg Sale $":       st.column_config.NumberColumn(format("$%.0f")),
+            "Insul $":          st.column_config.NumberColumn(format("$%.0f")),
+            "RB $":             st.column_config.NumberColumn(format("$%.0f")),
         }
     )
 
@@ -934,20 +955,20 @@ with tab_setters:
             sits_h = int(h_all["is_sit_harv"].sum()) if "is_sit_harv" in h_all.columns else 0
             sits_s = int(h_all["is_sit_sales"].sum()) if "is_sit_sales" in h_all.columns else 0
             sale_mask = h_all.get("is_sale_status", pd.Series(False, index=h_all.index)).astype(bool)
-            sales_n = int(sale_mask.sum())
             credit_deny_mask = h_all["Status"].astype(str).str.strip().str.lower() == "credit denial"
+            sales_n = int(sale_mask.sum())
             sales_amt = float(h_all.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in h_all.columns else 0.0
             sit_rate_h = (sits_h / apps) if apps else 0.0
-            close_rate = (sales_n / sits_s) if sits_s else 0.0
+            gross_close_rate = (sales_n / sits_s) if sits_s else 0.0
         except Exception:
-            apps=sits_h=sits_s=sales_n=0; sales_amt=0.0; sit_rate_h=close_rate=0.0
+            apps=sits_h=sits_s=sales_n=0; sales_amt=0.0; sit_rate_h=gross_close_rate=0.0
 
         summary = {
             "appointments": apps,
             "sits_harv": sits_h,
             "sit_rate_harv": sit_rate_h,
             "sales": sales_n,
-            "close_rate": close_rate,
+            "gross_close_rate": gross_close_rate,
             "sales_amt": sales_amt,
         }
 
@@ -989,15 +1010,16 @@ with tab_closers:
     st.dataframe(
         sales_display, use_container_width=True, hide_index=True,
         column_config={
-            "Sit %":   st.column_config.NumberColumn(format="%d%%"),
-            "Close %": st.column_config.NumberColumn(format="%d%%"),
+            "Sit %":            st.column_config.NumberColumn(format="%d%%"),
+            "Gross Close %":    st.column_config.NumberColumn(format="%d%%"),
+            "Net Close %":      st.column_config.NumberColumn(format="%d%%"),
             "Insul % of Sales": st.column_config.NumberColumn(format="%d%%"),
             "RB % of Sales":    st.column_config.NumberColumn(format="%d%%"),
             "Add-on % of Sales":st.column_config.NumberColumn(format="%d%%"),
-            "Sales $": st.column_config.NumberColumn(format("$%.0f")),
-            "Avg Sale $": st.column_config.NumberColumn(format("$%.0f")),
-            "Insul $": st.column_config.NumberColumn(format("$%.0f")),
-            "RB $":    st.column_config.NumberColumn(format("$%.0f")),
+            "Sales $":          st.column_config.NumberColumn(format("$%.0f")),
+            "Avg Sale $":       st.column_config.NumberColumn(format("$%.0f")),
+            "Insul $":          st.column_config.NumberColumn(format("$%.0f")),
+            "RB $":             st.column_config.NumberColumn(format("$%.0f")),
         }
     )
 
@@ -1067,15 +1089,16 @@ with tab_statuses:
 with tab_neal:
     st.subheader("Neal’s Pay Report")
     sales_amount = totals.total_contract_amount
-    close_rate = totals.close_rate  # 0..1
+    gross_close_rate = totals.gross_close_rate  # commission tier uses GROSS
+    net_close_rate = totals.net_close_rate
     insul_amount = totals.insul_cost_sum
     rb_amount = totals.rb_cost_sum
     addons_amount = insul_amount + rb_amount
 
-    # Sales commission rate based on close %
-    if close_rate >= 0.40:
+    # Sales commission rate based on GROSS close %
+    if gross_close_rate >= 0.40:
         pay_rate = 0.015     # 1.5%
-    elif close_rate >= 0.35:
+    elif gross_close_rate >= 0.35:
         pay_rate = 0.010     # 1.0%
     else:
         pay_rate = 0.005     # 0.5%
@@ -1087,13 +1110,13 @@ with tab_neal:
     c1, c2, c3 = st.columns(3)
     with c1:
         st.metric("Sales $", f"${sales_amount:,.0f}")
-        st.metric("Close %", f"{close_rate*100:,.2f}%")
+        st.metric("Gross Close %", f"{gross_close_rate*100:,.2f}%")
     with c2:
+        st.metric("Net Close %", f"{net_close_rate*100:,.2f}%")
         st.metric("Insulation $", f"${insul_amount:,.0f}")
-        st.metric("Radiant Barrier $", f"${rb_amount:,.0f}")
     with c3:
+        st.metric("Radiant Barrier $", f"${rb_amount:,.0f}")
         st.metric("Sales Commission Rate", f"{pay_rate*100:.2f}%")
-        st.metric("Add-ons %", "10.00%")
 
     st.markdown("### Pay Breakdown")
     pay_df = pd.DataFrame([
@@ -1107,7 +1130,8 @@ with tab_neal:
         "Download Neal Pay CSV",
         data=pd.DataFrame([{
             "Sales $": round(sales_amount,2),
-            "Close %": round(close_rate*100,2),
+            "Gross Close %": round(gross_close_rate*100,2),
+            "Net Close %": round(net_close_rate*100,2),
             "Insulation $": round(insul_amount,2),
             "Radiant Barrier $": round(rb_amount,2),
             "Add-ons $": round(addons_amount,2),
