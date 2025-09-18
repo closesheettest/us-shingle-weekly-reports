@@ -1,4 +1,5 @@
-# app.py — US Shingle Weekly Reports
+
+# app.py — US Shingle Weekly Reports (fixed)
 # - $ amounts only count when Status is classified as **Sale** (strict)
 # - Status Rules editor lists ONLY statuses in current file; auto-save merges into status_rules.json
 # - Overrides: "Override to Sit" affects HARVESTER ONLY (does NOT affect Sales-side sits)
@@ -59,7 +60,8 @@ def build_printable_harvester_html(harvester_name: str, summary: dict, df: pd.Da
 
     if "Total Contract" in table.columns:
         table["Total Contract"] = table["Total Contract"].map(_fmt_money)
-    for bcol, label in [("is_sit_harv","Sit (Harvester)"), ("is_sale_status","Sale"), ("is_noshow","No Show"):]:
+    # FIX: removed stray colon in list literal
+    for bcol, label in [("is_sit_harv","Sit (Harvester)"), ("is_sale_status","Sale"), ("is_noshow","No Show")]:
         if bcol in table.columns:
             table[label] = table[bcol].map(lambda v: "✓" if bool(v) else "")
             table.drop(columns=[bcol], inplace=True)
@@ -247,17 +249,14 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
     if "Total Contract" in out.columns:
         is_sale_from_amt = pd.to_numeric(out["Total Contract"], errors="coerce").fillna(0) > 0
 
-    # Final sale flag:
-    # - true if explicitly mapped as Sale
-    # - OR (option enabled AND amount>0 AND status unclassified)
+    # Final sale flag
     out["is_sale"] = is_sale_status | (infer_sale_from_amount & is_unclassified & is_sale_from_amt)
 
-    # --- NEVER treat "Sit-Pending" as Sale (case/punctuation/spacing-insensitive) ---
+    # --- NEVER treat "Sit-Pending" as Sale ---
     norm_status = status_clean.str.lower().str.replace(r"[^a-z]+", " ", regex=True).str.strip()
     never_sale_mask = norm_status.eq("sit pending")
     out.loc[never_sale_mask, "is_sale"] = False
     out.loc[never_sale_mask, "is_sale_status"] = False
-    # -------------------------------------------------------------------------------
 
     # Sit flags (separate)
     out["is_sit_harv"]  = status_clean.isin(sit_harv_set)  | (count_sold_as_sit_harv  & out["is_sale_status"])
@@ -277,10 +276,8 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
     rb_cost    = out.get("Radiant Barrier Cost", pd.Series(0, index=out.index))
     rb_sqft    = out.get("Radiant Barrier Sqft", pd.Series(0, index=out.index))
 
-    has_insul_any = (pd.to_numeric(insul_cost, errors="coerce").fillna(0) > 0) | \
-                    (pd.to_numeric(insul_sqft, errors="coerce").fillna(0) > 0)
-    has_rb_any    = (pd.to_numeric(rb_cost,  errors="coerce").fillna(0) > 0) | \
-                    (pd.to_numeric(rb_sqft,  errors="coerce").fillna(0) > 0)
+    has_insul_any = (pd.to_numeric(insul_cost, errors="coerce").fillna(0) > 0) |                     (pd.to_numeric(insul_sqft, errors="coerce").fillna(0) > 0)
+    has_rb_any    = (pd.to_numeric(rb_cost,  errors="coerce").fillna(0) > 0) |                     (pd.to_numeric(rb_sqft,  errors="coerce").fillna(0) > 0)
 
     out["has_insul"]      = out["is_sale_status"] & has_insul_any
     out["has_rb"]         = out["is_sale_status"] & has_rb_any
@@ -302,7 +299,6 @@ def compute_totals(flag_df: pd.DataFrame) -> Totals:
 
     # $ only from strict sale status
     sale_mask = strict_sales_mask
-    credit_deny_mask = flag_df["Status"].astype(str).str.strip().str.lower().eq("credit denial")
     credit_deny_mask = flag_df["Status"].astype(str).str.strip().str.lower() == "credit denial"
     sales_amt = float(flag_df.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in flag_df.columns else 0.0
 
@@ -356,10 +352,11 @@ def compute_sales_report(flag_df: pd.DataFrame, closer_col: str) -> pd.DataFrame
     def row(g: pd.DataFrame):
         appts = len(g)
         sits  = int(g["is_sit_sales"].sum())
+
+        # FIX: define sale_mask BEFORE using it
+        sale_mask = g.get("is_sale_status", pd.Series(False, index=g.index)).astype(bool)
         sales = int(sale_mask.sum())
 
-        # Strict sale mask for $ and avg
-        sale_mask = g.get("is_sale_status", pd.Series(False, index=g.index)).astype(bool)
         credit_deny_mask = g["Status"].astype(str).str.strip().str.lower() == "credit denial"
         sales_amt = float(g.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
         strict_sales = int(sale_mask.sum())
@@ -408,9 +405,11 @@ def compute_source_report(flag_df: pd.DataFrame, source_col: str = "Source", sit
     def row(g: pd.DataFrame):
         appts = len(g)
         sits  = int(g[sit_flag].sum())
+
+        # FIX: define sale_mask BEFORE using it
+        sale_mask = g.get("is_sale_status", pd.Series(False, index=g.index)).astype(bool)
         sales = int(sale_mask.sum())
 
-        sale_mask = g.get("is_sale_status", pd.Series(False, index=g.index)).astype(bool)
         credit_deny_mask = g["Status"].astype(str).str.strip().str.lower() == "credit denial"
         sales_amt = float(g.loc[sale_mask & ~credit_deny_mask, "Total Contract"].sum()) if "Total Contract" in g.columns else 0.0
         strict_sales = int(sale_mask.sum())
@@ -960,7 +959,7 @@ with tab_setters:
             if st.button("🖨 Print This Harvester (with overrides & notes)", key="print_harvester"):
                 js = f"""
                 <script>
-                  const html = `{html_doc.replace("\\\\", "\\\\\\\\").replace("`", "\\\\`")}`;
+                  const html = `{html_doc.replace("\\", "\\\\").replace("`", "\\`")}`;
                   const w = window.open("", "_blank");
                   w.document.open();
                   w.document.write(html);
