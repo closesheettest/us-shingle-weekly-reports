@@ -233,12 +233,24 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
     is_sale_status = status_clean.isin(sale_set)
     out["is_sale_status"] = is_sale_status
 
-    # Backward-compatible sale flag (may include $>0 inference if enabled)
-    is_sale_from_rule = is_sale_status
-    is_sale_from_amt  = False
+    # Determine if status is in ANY known bucket
+    in_any_set = (
+        status_clean.isin(sale_set) |
+        status_clean.isin(sit_sales_set) |
+        status_clean.isin(sit_harv_set) |
+        status_clean.isin(noshow_set)
+    )
+    is_unclassified = ~in_any_set
+
+    # Amount-based inference ($>0) — only for UNCLASSIFIED rows
+    is_sale_from_amt = False
     if "Total Contract" in out.columns:
         is_sale_from_amt = pd.to_numeric(out["Total Contract"], errors="coerce").fillna(0) > 0
-    out["is_sale"] = is_sale_from_rule | (infer_sale_from_amount & is_sale_from_amt)
+
+    # Final sale flag:
+    # - true if explicitly mapped as Sale
+    # - OR (option enabled AND amount>0 AND status unclassified)
+    out["is_sale"] = is_sale_status | (infer_sale_from_amount & is_unclassified & is_sale_from_amt)
 
     # --- NEVER treat "Sit-Pending" as Sale (case/punctuation/spacing-insensitive) ---
     norm_status = status_clean.str.lower().str.replace(r"[^a-z]+", " ", regex=True).str.strip()
@@ -259,7 +271,7 @@ def build_flags(df: pd.DataFrame, *, rules: dict,
         ov = out["Override To Sit"].fillna(False).astype(bool)
         out.loc[ov, "is_sit_harv"] = True
 
-    # Insulation / RB attributes (count ONLY when status is a Sale)
+    # Insulation / RB attributes (count ONLY when status is a Sale by STATUS)
     insul_cost = out.get("Insulation Cost", pd.Series(0, index=out.index))
     insul_sqft = out.get("Insulation Sqft", pd.Series(0, index=out.index))
     rb_cost    = out.get("Radiant Barrier Cost", pd.Series(0, index=out.index))
@@ -942,7 +954,7 @@ with tab_setters:
             if st.button("🖨 Print This Harvester (with overrides & notes)", key="print_harvester"):
                 js = f"""
                 <script>
-                  const html = `{html_doc.replace("\\", "\\\\").replace("`", "\\`")}`;
+                  const html = `{html_doc.replace("\\\\", "\\\\\\\\").replace("`", "\\\\`")}`;
                   const w = window.open("", "_blank");
                   w.document.open();
                   w.document.write(html);
