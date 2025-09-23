@@ -1,0 +1,82 @@
+{
+  "sit_statuses": [
+    "Sat",
+    "Presented",
+    "Met",
+    "Demo"
+  ],
+  "sale_statuses": [
+    "Sold",
+    "Approved",
+    "Contract Signed"
+  ],
+  "no_show_statuses": [
+    "No Show",
+    "Cancel",
+    "Rescheduled (No Sit)",
+    "No Sit - rescheduled"
+  ],
+  "exclude_statuses": [],
+  "columns": {
+    "job_name": [
+      "job name",
+      "name",
+      "job",
+      "customer name"
+    ],
+    "date_created": [
+      "date created",
+      "created date",
+      "created"
+    ],
+    "start_date": [
+      "start date",
+      "appt date",
+      "appointment date",
+      "scheduled date"
+    ],
+    "status": [
+      "status",
+      "result",
+      "disposition"
+    ],
+    "sales_rep": [
+      "sales rep",
+      "salesperson",
+      "rep",
+      "sales consultant"
+    ],
+    "total_contract": [
+      "total contract",
+      "approved estimates (total)",
+      "sales amount",
+      "contract total",
+      "amount"
+    ],
+    "appointment_set_by": [
+      "appointment set by",
+      "set by",
+      "harvester",
+      "source"
+    ],
+    "insulation_amount": [
+      "insulation ($)",
+      "insulation amount",
+      "insulation",
+      "insulation cost",
+      "Insulation Cost"
+    ],
+    "radiant_amount": [
+      "radiant barrier ($)",
+      "radiant barrier amount",
+      "radiant barrier",
+      "radiant barrier cost",
+      "Radiant Barrier Cost"
+    ],
+    "insulation_radiant_combined": [
+      "insulation and radiant barrier",
+      "insulation/radiant",
+      "irbad"
+    ]
+  }
+}

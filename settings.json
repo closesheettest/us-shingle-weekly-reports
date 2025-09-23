@@ -1,0 +1,136 @@
+{
+  "sit_statuses": [
+    "Sat",
+    "Presented",
+    "Met",
+    "Demo"
+  ],
+  "sale_statuses": [
+    "Sold",
+    "Approved",
+    "Contract Signed"
+  ],
+  "no_show_statuses": [
+    "No Show",
+    "Cancel",
+    "Rescheduled (No Sit)",
+    "No Sit - rescheduled"
+  ],
+  "exclude_statuses": [
+    "Credit Denial"
+  ],
+  "status_mapping": {
+    "Credit Denial": {
+      "is_sale": true,
+      "is_sit_sales": true,
+      "is_sit_harvester": true,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": true
+    },
+    "DQ": {
+      "is_sale": false,
+      "is_sit_sales": false,
+      "is_sit_harvester": false,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "Install Set": {
+      "is_sale": true,
+      "is_sit_sales": true,
+      "is_sit_harvester": true,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "New Roof": {
+      "is_sale": false,
+      "is_sit_sales": false,
+      "is_sit_harvester": true,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "No Show- H/O": {
+      "is_sale": false,
+      "is_sit_sales": false,
+      "is_sit_harvester": false,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "No Sit - Rescheduled": {
+      "is_sale": false,
+      "is_sit_sales": false,
+      "is_sit_harvester": false,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "No Sit- Need to Reschedule": {
+      "is_sale": false,
+      "is_sit_sales": false,
+      "is_sit_harvester": false,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "Other": {
+      "is_sale": false,
+      "is_sit_sales": false,
+      "is_sit_harvester": false,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "Production Review": {
+      "is_sale": true,
+      "is_sit_sales": true,
+      "is_sit_harvester": true,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "Refused Appointment": {
+      "is_sale": false,
+      "is_sit_sales": false,
+      "is_sit_harvester": false,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "Signed Contract": {
+      "is_sale": true,
+      "is_sit_sales": true,
+      "is_sit_harvester": true,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "Sit - No Sale": {
+      "is_sale": false,
+      "is_sit_sales": true,
+      "is_sit_harvester": true,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "Sit - Pending": {
+      "is_sale": false,
+      "is_sit_sales": true,
+      "is_sit_harvester": true,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    },
+    "Sit - Sold": {
+      "is_sale": true,
+      "is_sit_sales": true,
+      "is_sit_harvester": true,
+      "is_no_sit_sales": false,
+      "is_no_sit_harvester": false,
+      "is_excluded": false
+    }
+  }
+}
