@@ -1,260 +1,209 @@
-import streamlit as st
+from __future__ import annotations
 import json
 from pathlib import Path
-from datetime import datetime
+import streamlit as st
 import pandas as pd
 
 from report_utils import (
-    load_config_from_path, read_input_file,
-    normalize_columns, ensure_columns, tag_statuses,
-    compute_sales_rep_report, compute_company_totals,
-    compute_harvester_report, compute_harvester_pay,
+    load_config_from_path,
+    save_config_to_path,
+    read_input_file,
+    normalize_columns,
+    compute_sales_rep_table,
+    to_excel_bytes,
 )
 
-st.set_page_config(page_title="US Shingle Weekly Reports", page_icon="📊", layout="wide")
+st.set_page_config(page_title="US Shingle Weekly Reports", layout="wide")
 
-APP_DIR = Path(__file__).parent
-CONFIG_PATH = APP_DIR / "weekly_report_config.json"
-SETTINGS_PATH = APP_DIR / "settings.json"
 
-# ---------------- Settings helpers ----------------
-def get_settings():
-    if SETTINGS_PATH.exists():
-        try:
-            return json.loads(SETTINGS_PATH.read_text())
-        except Exception:
-            pass
-    cfg = load_config_from_path(CONFIG_PATH)
-    return {
-        "sit_statuses": cfg.get("sit_statuses", []),
-        "sale_statuses": cfg.get("sale_statuses", []),
-        "no_show_statuses": cfg.get("no_show_statuses", []),
-        "exclude_statuses": [],
-        "status_mapping": {}
-    }
+# ------------------------------------
+# Session helpers
+# ------------------------------------
 
-def save_settings(data: dict):
-    SETTINGS_PATH.write_text(json.dumps(data, indent=2))
+SETTINGS_FILE = Path("settings.json")  # persisted mapping/status config
 
-def merge_settings_into_config(cfg, settings):
-    for k in ["sit_statuses","sale_statuses","no_show_statuses"]:
-        cfg[k] = settings.get(k, cfg.get(k, []))
+
+def get_settings() -> dict:
+    cfg = load_config_from_path(SETTINGS_FILE)
+    # Defaults
+    cfg.setdefault("columns", {})
+    # Column keys used by the app
+    for key, default in {
+        "job_name": "Job Name",
+        "status": "Status",
+        "sales_rep": "Sales Rep",
+        "appointment_set_by": "Appointment Set By",
+        "insulation_cost": "Insulation Cost",
+        "radiant_barrier_cost": "Radiant Barrier Cost",
+    }.items():
+        cfg["columns"].setdefault(key, default)
+
+    cfg.setdefault("sale_statuses", ["Signed Contract", "Sit - Sold"])
+    cfg.setdefault("sit_sales_statuses", ["Signed Contract", "Sit - Sold", "Sit - Pending", "Sit - No Sale"])
+    cfg.setdefault("sit_harvester_statuses", ["Signed Contract", "Sit - Sold", "Sit - Pending", "Sit - No Sale", "Credit Denial"])
+    cfg.setdefault("net_exclude_statuses", ["Credit Denial"])
     return cfg
 
-def fmt_pct_cols(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    for c in out.columns:
-        if isinstance(c, str) and c.endswith("%"):
-            out[c] = (pd.to_numeric(out[c], errors="coerce").fillna(0)*100).round(0).astype("Int64").astype(str) + "%"
-    return out
 
-def build_print_html(company, reps, harvesters, pay) -> bytes:
-    style = """
-    <style>
-      body { font-family: Arial, sans-serif; margin: 24px; }
-      h1 { margin: 0 0 8px 0; }
-      h2 { margin: 24px 0 8px 0; }
-      .meta { color:#555; margin-bottom: 16px; }
-      table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
-      th, td { border: 1px solid #ddd; padding: 8px; }
-      th { background: #f6f6f6; text-align: left; }
-    </style>
-    """
-    def df_html(d): return d.to_html(index=False, border=0)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    html = [
-        style,
-        "<h1>US Shingle Weekly Report</h1>",
-        f"<div class='meta'>Generated: {now}</div>",
-        "<h2>Company Totals</h2>", df_html(company),
-        "<h2>Sales Rep Summary</h2>", df_html(reps),
-        "<h2>Harvester Summary</h2>", df_html(harvesters),
-        "<h2>Harvester Pay</h2>", df_html(pay)
-    ]
-    return "\\n".join(html).encode("utf-8")
+def save_settings(cfg: dict) -> None:
+    save_config_to_path(cfg, SETTINGS_FILE)
 
-# -------- Single uploader (shared by both tabs) --------
-st.title("📊 US Shingle Weekly Reports")
-st.caption("Credit Denial is always excluded from NET (Sales & Net Sit) and always counts as a Sit for Harvesters.")
 
-uploaded = st.file_uploader("Upload one file (.csv, .xlsx, .xlsm, .xlsb) — used for **both** Mapping and Reports",
-                            type=["csv","xlsx","xlsm","xlsb"])
+# ------------------------------------
+# UI
+# ------------------------------------
 
-@st.cache_data(show_spinner=False)
-def _load_df(file_bytes: bytes, file_name: str):
-    from io import BytesIO
-    class Up:
-        def __init__(self, name, data): self.name, self._b = name, BytesIO(data)
-        def read(self, *a, **k): return self._b.read(*a, **k)
-        def seek(self, *a, **k): return self._b.seek(*a, **k)
-    cfg = load_config_from_path(CONFIG_PATH)
-    up = Up(file_name, file_bytes)
-    df = read_input_file(up)
-    df = normalize_columns(df)
-    cols_map = ensure_columns(df, cfg)
-    return df, cols_map, cfg
+st.title("US Shingle Weekly Reports")
+st.caption("Single upload → map columns and statuses → Sales Rep & Harvester metrics.")
 
-df_shared = None
-cols_shared = None
-cfg_base = None
-if uploaded is not None:
-    try:
-        file_bytes = uploaded.getvalue()
-        df_shared, cols_shared, cfg_base = _load_df(file_bytes, uploaded.name)
-        st.success(f"Loaded: {uploaded.name}  •  {len(df_shared):,} rows")
-    except Exception as e:
-        st.error(f"Could not read file: {e}")
+# One upload used everywhere
+uploaded = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xlsm", "xls"])
+if uploaded:
+    st.session_state["_raw_df"] = read_input_file(uploaded)
+else:
+    st.session_state.pop("_raw_df", None)
 
-tabs = st.tabs(["🔧 Settings", "📂 Reports"])
+cfg = get_settings()
 
-# ---------------- Settings Tab ----------------
-with tabs[0]:
-    st.subheader("Defaults (used if a per-status mapping is not set)")
-    s = get_settings()
+with st.expander("Settings", expanded=False):
+    st.subheader("Column mapping")
+    cols = cfg["columns"]
+    # Offer automatic detection from uploaded file
+    df_preview = None
+    if "_raw_df" in st.session_state:
+        df_preview = normalize_columns(st.session_state["_raw_df"])
+        st.dataframe(df_preview.head(5), use_container_width=True)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        sit = st.text_input("Default Sit Statuses (comma-separated)", value=", ".join(s.get("sit_statuses", [])))
-        noshow = st.text_input("Default No Show Statuses (comma-separated)", value=", ".join(s.get("no_show_statuses", [])))
-    with c2:
-        sale = st.text_input("Default Sale Statuses (comma-separated)", value=", ".join(s.get("sale_statuses", [])))
-        st.caption("Exclude (NET) is hard-coded to 'Credit Denial'.")
+    col_map = {}
+    for label, key in [
+        ("Job Name", "job_name"),
+        ("Status", "status"),
+        ("Sales Rep", "sales_rep"),
+        ("Appointment Set By", "appointment_set_by"),
+        ("Insulation Cost", "insulation_cost"),
+        ("Radiant Barrier Cost", "radiant_barrier_cost"),
+    ]:
+        default = cols.get(key, label)
+        col_map[key] = st.text_input(f"{label} column name", value=default)
 
-    if st.button("Save Default Lists"):
-        s["sit_statuses"] = [x.strip() for x in sit.split(",") if x.strip()]
-        s["sale_statuses"] = [x.strip() for x in sale.split(",") if x.strip()]
-        s["no_show_statuses"] = [x.strip() for x in noshow.split(",") if x.strip()]
-        SETTINGS_PATH.write_text(json.dumps(s, indent=2))
-        st.success("Default lists saved.")
+    st.markdown("---")
+    st.subheader("Status mapping")
 
-    st.divider()
-    st.subheader("Status Mapping (per status)")
-    st.caption("Uses the same uploaded file to detect Status values. Check boxes and click **Save Mapping**. "
-               "Credit Denial is always counted as Sit (Harvester) and excluded from NET.")
+    def tag_multiselect(label, current):
+        return st.multiselect(label, options=sorted(_all_statuses(df_preview)), default=current)
 
-    if df_shared is None:
-        st.info("Upload a file above to configure mapping.")
-    else:
-        col_status = cols_shared["status"]
-        statuses = sorted(df_shared[col_status].dropna().astype(str).str.strip().unique().tolist())
-        st.write(f"Found **{len(statuses)}** unique statuses.")
+    # Build all statuses seen in uploaded file (if any)
+    def _all_statuses(df: pd.DataFrame | None):
+        if df is None:
+            return set(cfg.get("_last_statuses", ["Signed Contract", "Sit - Sold", "Credit Denial", "Sit - Pending", "Sit - No Sale"]))
+        s_col = col_map["status"]
+        if s_col.lower().replace(" ", "_") in df.columns:
+            vals = df[s_col.lower().replace(" ", "_")].dropna().astype(str).str.strip().unique().tolist()
+            cfg["_last_statuses"] = vals
+            return set(vals)
+        return set()
 
-        current = s.get("status_mapping", {})
-        with st.form("status_mapping_form", clear_on_submit=False):
-            st.write("Tick the boxes for each status:")
-            hdr = st.columns([3,1.2,1.2,1.6,1.6])
-            hdr[0].markdown("**Status**")
-            hdr[1].markdown("**Sale (Sales)**")
-            hdr[2].markdown("**Sit (Sales)**")
-            hdr[3].markdown("**Sit (Harvester)**")
-            hdr[4].markdown("**No Sit (Sales)**")
-            extra = st.columns([1.6])
-            extra[0].markdown("**No Sit (Harvester)**")
+    sale_statuses = tag_multiselect("Sale (Sales) statuses", cfg["sale_statuses"])
+    sit_sales = tag_multiselect("Sit (Sales) statuses", cfg["sit_sales_statuses"])
+    sit_harv = tag_multiselect("Sit (Harvester) statuses", cfg["sit_harvester_statuses"])
+    net_excl = tag_multiselect("NET exclude statuses (e.g., Credit Denial)", cfg["net_exclude_statuses"])
 
-            new_map = {}
-            for st_name in statuses:
-                row = st.columns([3,1.2,1.2,1.6,1.6,1.6])
-                flags = current.get(st_name, {})
-                is_cd = st_name.lower().strip() == "credit denial"
+    if st.button("Save Settings"):
+        cfg["columns"] = col_map
+        cfg["sale_statuses"] = sale_statuses
+        cfg["sit_sales_statuses"] = sit_sales
+        cfg["sit_harvester_statuses"] = sit_harv
+        cfg["net_exclude_statuses"] = net_excl
+        save_settings(cfg)
+        st.success("Settings saved.")
 
-                if is_cd:
-                    sale_b = True
-                    sit_s  = True
-                    sit_h  = True
-                    ns_s   = False
-                    ns_h   = False
-                    row[1].checkbox("", value=True, key=f"sale_{st_name}", disabled=True)
-                    row[2].checkbox("", value=True, key=f"sitS_{st_name}", disabled=True)
-                    row[3].checkbox("", value=True, key=f"sitH_{st_name}", disabled=True)
-                    row[4].checkbox("", value=False, key=f"nsS_{st_name}", disabled=True)
-                    row[5].checkbox("", value=False, key=f"nsH_{st_name}", disabled=True)
-                else:
-                    sale_b = row[1].checkbox("", value=bool(flags.get("is_sale")), key=f"sale_{st_name}")
-                    sit_s  = row[2].checkbox("", value=bool(flags.get("is_sit_sales")), key=f"sitS_{st_name}")
-                    sit_h  = row[3].checkbox("", value=bool(flags.get("is_sit_harvester")), key=f"sitH_{st_name}")
-                    ns_s   = row[4].checkbox("", value=bool(flags.get("is_no_sit_sales")), key=f"nsS_{st_name}")
-                    ns_h   = row[5].checkbox("", value=bool(flags.get("is_no_sit_harvester")), key=f"nsH_{st_name}")
+st.markdown("---")
 
-                row[0].write(st_name)
-                new_map[st_name] = {
-                    "is_sale": sale_b,
-                    "is_sit_sales": sit_s,
-                    "is_sit_harvester": sit_h,
-                    "is_no_sit_sales": ns_s,
-                    "is_no_sit_harvester": ns_h
-                }
+# ------------------------------------
+# Report
+# ------------------------------------
 
-            if st.form_submit_button("Save Mapping"):
-                s["status_mapping"] = new_map
-                SETTINGS_PATH.write_text(json.dumps(s, indent=2))
-                st.success("Status mapping saved.")
+if "_raw_df" not in st.session_state:
+    st.info("Upload a file to generate reports.")
+    st.stop()
 
-# ---------------- Reports Tab ----------------
-with tabs[1]:
-    st.subheader("Reports")
-    if df_shared is None:
-        st.info("Upload a file above to see reports.")
-    else:
-        settings = get_settings()
-        cfg = merge_settings_into_config(cfg_base, settings)
+raw_df = st.session_state["_raw_df"].copy()
+df = normalize_columns(raw_df)
 
-        tagged = tag_statuses(df_shared, cols_shared["status"], cfg, settings).copy()
-        tagged["Harvester"] = (
-            tagged[cols_shared["appointment_set_by"]].fillna("").astype(str).str.strip().replace("", "Company")
-        )
+# Pull mapped columns (normalized)
+c = cfg["columns"]
+col_job = c["job_name"]
+col_status = c["status"]
+col_sales_rep = c["sales_rep"]
+col_appt_by = c["appointment_set_by"]
+col_insul = c["insulation_cost"]
+col_rad = c["radiant_barrier_cost"]
 
-        # Build summaries
-        rep  = compute_sales_rep_report(tagged, cols_shared)
-        comp = compute_company_totals(tagged, cols_shared)
-        harv = compute_harvester_report(tagged, cols_shared)
-        pay  = compute_harvester_pay(harv)
+# Normalize names to match df.columns (lower/underscores)
+def norm(name: str) -> str:
+    return name.strip().replace(" ", "_").lower()
 
-        # Show
-        t1, t2, t3, t4, t5 = st.tabs([
-            "Sales Rep Summary", "Company Totals", "Harvester Summary", "Harvester Pay", "Print / Export"
-        ])
+col_job = norm(col_job)
+col_status = norm(col_status)
+col_sales_rep = norm(col_sales_rep)
+col_appt_by = norm(col_appt_by)
+col_insul = norm(col_insul)
+col_rad = norm(col_rad)
 
-        with t1:
-            desired_order = [
-                "Sales Rep","Appointments","Sits","Sit %","Net Sit","Net Sit %","Sales","Sales %",
-                "Net Sales","Net Sales %","insulation (dollar amount)","radiant Barrier (dollar Amount)","irbad %"
-            ]
-            rep = rep[[c for c in desired_order if c in rep.columns]]
-            st.dataframe(fmt_pct_cols(rep), use_container_width=True)
+missing = [x for x in [col_status, col_sales_rep, col_appt_by] if x not in df.columns]
+if missing:
+    st.error(f"Missing required columns in upload: {missing}. Check the column mapping in Settings.")
+    st.stop()
 
-        with t2:
-            st.dataframe(fmt_pct_cols(comp), use_container_width=True)
+sales_tbl, harv_tbl = compute_sales_rep_table(
+    df=df,
+    col_job=col_job,
+    col_status=col_status,
+    col_sales_rep=col_sales_rep,
+    col_appt_by=col_appt_by,
+    col_insul=col_insul if col_insul in df.columns else "",
+    col_radiant=col_rad if col_rad in df.columns else "",
+    sale_statuses=cfg["sale_statuses"],
+    sit_sales_statuses=cfg["sit_sales_statuses"],
+    sit_harvester_statuses=cfg["sit_harvester_statuses"],
+    net_exclude_statuses=cfg["net_exclude_statuses"],
+)
 
-        with t3:
-            st.dataframe(harv, use_container_width=True)
+st.subheader("By Sales Rep")
+st.dataframe(sales_tbl, use_container_width=True)
 
-        with t4:
-            st.dataframe(pay, use_container_width=True)
+st.subheader("By Harvester")
+st.dataframe(harv_tbl, use_container_width=True)
 
-        with t5:
-            # Print-ready HTML
-            html_bytes = build_print_html(
-                fmt_pct_cols(comp), fmt_pct_cols(rep), harv, pay
-            )
-            st.download_button(
-                "⬇️ Download Print-Ready HTML",
-                data=html_bytes,
-                file_name="US_Shingle_Weekly_Report_Print.html",
-                mime="text/html",
-                help="Open in your browser, then File → Print (or Save as PDF)."
-            )
+# KPIs (company totals)
+if not sales_tbl.empty:
+    total_row = {
+        "Sales Rep": "Company Total",
+        "Appointments": int(sales_tbl["Appointments"].sum()),
+        "Sits": int(sales_tbl["Sits"].sum()),
+        "Sit %": (sales_tbl["Sits"].sum() / sales_tbl["Appointments"].sum() * 100.0) if sales_tbl["Appointments"].sum() else 0.0,
+        "Net Sits": int(sales_tbl["Net Sits"].sum()),
+        "Net Sit %": (sales_tbl["Net Sits"].sum() / (sales_tbl["Appointments"].sum() - (sales_tbl["Appointments"].sum() - sales_tbl["Appointments"].sum())) * 100.0) if sales_tbl["Appointments"].sum() else 0.0,  # placeholder, already in table rows
+        "Sales": int(sales_tbl["Sales"].sum()),
+        "Sales %": (sales_tbl["Sales"].sum() / sales_tbl["Sits"].sum() * 100.0) if sales_tbl["Sits"].sum() else 0.0,
+        "Net Sales": int(sales_tbl["Net Sales"].sum()),
+        "Net Sales %": (sales_tbl["Net Sales"].sum() / sales_tbl["Net Sits"].sum() * 100.0) if sales_tbl["Net Sits"].sum() else 0.0,
+        "Insulation $": float(sales_tbl["Insulation $"].sum()),
+        "Radiant Barrier $": float(sales_tbl["Radiant Barrier $"].sum()),
+        "IRBAD %": ( (sales_tbl["IRBAD %"] * sales_tbl["Sales"]).sum() / sales_tbl["Sales"].sum() ) if sales_tbl["Sales"].sum() else 0.0,
+    }
+    st.markdown("#### Company Totals")
+    st.dataframe(pd.DataFrame([total_row]), use_container_width=True)
 
-            # Excel workbook (built here so it uses current mapping)
-            import io
-            bio = io.BytesIO()
-            with pd.ExcelWriter(bio, engine="xlsxwriter") as xw:
-                rep.to_excel(xw, sheet_name="Sales Rep Summary", index=False)
-                comp.to_excel(xw, sheet_name="Company Totals", index=False)
-                harv.to_excel(xw, sheet_name="Harvester Summary", index=False)
-                pay.to_excel(xw, sheet_name="Harvester Pay", index=False)
-            st.download_button(
-                "⬇️ Download Weekly_Reports.xlsx",
-                data=bio.getvalue(),
-                file_name="Weekly_Reports.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+# Download workbook
+tables = {
+    "Sales by Rep": sales_tbl,
+    "Harvesters": harv_tbl,
+}
+xlsx_bytes = to_excel_bytes(tables)
+st.download_button(
+    "Download Excel",
+    data=xlsx_bytes,
+    file_name="weekly_reports.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
