@@ -1,64 +1,34 @@
-from __future__ import annotations
-from pathlib import Path
-import json
-import io
-from typing import Dict, List, Tuple
-
+import numpy as np
 import pandas as pd
 
 
-# ---------------------------
-# File + Config helpers
-# ---------------------------
-
-def load_config_from_path(path: str | Path) -> dict:
-    """Load a small JSON config (e.g., settings.json)."""
-    path = Path(path)
-    if not path.exists():
-        return {}
-    with open(path, "r") as f:
-        return json.load(f)
-
-
-def save_config_to_path(cfg: dict, path: str | Path) -> None:
-    path = Path(path)
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2)
-
-
-def read_input_file(upload) -> pd.DataFrame:
-    """Read CSV or Excel-like uploads to a DataFrame."""
-    name = upload.name.lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(upload)
-    if name.endswith((".xlsx", ".xlsm", ".xls")):
-        return pd.read_excel(upload)
-    raise ValueError("Unsupported file type. Please upload .csv or .xlsx/.xlsm/.xls")
+def load_default_config():
+    # Minimal defaults – no hardcoded statuses to avoid "default not in options" errors
+    return {
+        "column_map": {
+            "job_name": "",
+            "date_created": "",
+            "start_date": "",
+            "status": "",
+            "sales_rep": "",
+            "total_contract": "",
+            "harvester": "",
+            "insulation_cost": "",
+            "radiant_barrier_cost": "",
+        },
+        "sale_statuses": [],
+        "sit_sales_statuses": [],
+        "sit_harvest_statuses": [],
+        "credit_denial_statuses": [],
+    }
 
 
-# ---------------------------
-# Data normalization helpers
-# ---------------------------
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Lowercase and strip columns, replace spaces with underscores for easier access."""
-    df = df.copy()
-    df.columns = (
-        df.columns.astype(str)
-        .str.strip()
-        .str.replace(r"\s+", "_", regex=True)
-        .str.lower()
-    )
-    return df
-
-
-def coerce_money(series: pd.Series) -> pd.Series:
-    """Convert money-like columns to numeric; strip commas/$."""
+def coerce_money(s):
+    """Safely coerce strings like '$1,234.50' to numeric."""
     return (
         pd.to_numeric(
-            series.astype(str)
-            .str.replace(",", "", regex=False)
-            .str.replace("$", "", regex=False)
+            s.astype(str)
+            .str.replace(r"[\$,]", "", regex=True)
             .str.strip(),
             errors="coerce",
         )
@@ -66,132 +36,131 @@ def coerce_money(series: pd.Series) -> pd.Series:
     )
 
 
-# ---------------------------
-# Core metrics
-# ---------------------------
+def _format_pct(series):
+    """Return whole-number percentages as strings without decimals."""
+    # Avoid division by zero / NaN
+    out = (series * 100).round(0).astype("Int64")
+    return out.astype(str) + "%"
 
-def compute_sales_rep_table(
-    df: pd.DataFrame,
-    col_job: str,
-    col_status: str,
-    col_sales_rep: str,
-    col_appt_by: str,
-    col_insul: str,
-    col_radiant: str,
-    sale_statuses: List[str],
-    sit_sales_statuses: List[str],
-    sit_harvester_statuses: List[str],
-    net_exclude_statuses: List[str],
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+
+def _fmt_money(series):
+    return series.round(2).map(lambda x: f"${x:,.2f}")
+
+
+def build_sales_by_rep_table(
+    df,
+    sale_statuses: set,
+    sit_sales_statuses: set,
+    credit_denial_statuses: set,
+):
+    """Build the per-rep table in the exact column order requested."""
+    work = df.copy()
+
+    # helper flags
+    work["is_appt"] = True  # each row is an appointment
+    work["is_sit_sales"] = work["status"].isin(sit_sales_statuses)
+    work["is_sale"] = work["status"].isin(sale_statuses)
+    work["is_credit_denial"] = work["status"].isin(credit_denial_statuses)
+
+    # dollar columns
+    for col in ["total_contract", "insulation_cost", "radiant_barrier_cost"]:
+        if col not in work.columns:
+            work[col] = 0.0
+
+    # NET filter removes credit denial rows entirely
+    net = work.loc[~work["is_credit_denial"]].copy()
+
+    # counts by rep
+    grp_all = work.groupby("sales_rep", dropna=False)
+    grp_net = net.groupby("sales_rep", dropna=False)
+
+    # appointments
+    appts = grp_all["is_appt"].sum(min_count=1).fillna(0).astype(int)
+
+    # sits / net sits
+    sits = grp_all["is_sit_sales"].sum(min_count=1).fillna(0).astype(int)
+    net_sits = grp_net["is_sit_sales"].sum(min_count=1).fillna(0).astype(int)
+
+    # sales / net sales (count)
+    sales = grp_all["is_sale"].sum(min_count=1).fillna(0).astype(int)
+    net_sales = grp_net["is_sale"].sum(min_count=1).fillna(0).astype(int)
+
+    # close rates
+    sit_pct = (sits / appts.replace(0, np.nan)).fillna(0.0)
+    net_sit_pct = (net_sits / grp_net["is_appt"].sum(min_count=1).replace(0, np.nan)).fillna(0.0)
+    sales_pct = (sales / sits.replace(0, np.nan)).fillna(0.0)
+    net_sales_pct = (net_sales / net_sits.replace(0, np.nan)).fillna(0.0)
+
+    # dollars
+    insul = grp_all["insulation_cost"].sum(min_count=1).fillna(0.0)
+    rb = grp_all["radiant_barrier_cost"].sum(min_count=1).fillna(0.0)
+
+    # IRBAD % = percent of *sales count* with at least one of the two
+    work["has_irbad"] = (work["insulation_cost"] > 0) | (work["radiant_barrier_cost"] > 0)
+    sales_only = work.loc[work["is_sale"]].copy()
+    grp_sales_only = sales_only.groupby("sales_rep", dropna=False)
+    irbad_count = grp_sales_only["has_irbad"].sum(min_count=1).reindex(appts.index).fillna(0).astype(int)
+    sales_count = sales.reindex(appts.index).fillna(0).astype(int)
+    irbad_pct = (irbad_count / sales_count.replace(0, np.nan)).fillna(0.0)
+
+    # assemble
+    out = pd.DataFrame({
+        "Sales Rep": appts.index.astype(str),
+        "Appointments": appts.values,
+        "Sits": sits.values,
+        "Sit %": _format_pct(sit_pct),
+        "Net Sits": net_sits.values,
+        "Net Sit %": _format_pct(net_sit_pct),
+        "Sales": sales.values,
+        "Sales %": _format_pct(sales_pct),
+        "Net Sales": net_sales.values,
+        "Net Sales %": _format_pct(net_sales_pct),
+        "Insulation $": _fmt_money(insul),
+        "Radiant Barrier $": _fmt_money(rb),
+        "IRBAD %": _format_pct(irbad_pct),
+    }).sort_values("Sales Rep", kind="stable").reset_index(drop=True)
+
+    return out
+
+
+def build_harvester_table(df, sit_harvest_statuses: set):
+    work = df.copy()
+    work["is_appt"] = True
+    work["is_sit_harv"] = work["status"].isin(sit_harvest_statuses)
+
+    grp = work.groupby("harvester", dropna=False)
+    appts = grp["is_appt"].sum(min_count=1).fillna(0).astype(int)
+    sits = grp["is_sit_harv"].sum(min_count=1).fillna(0).astype(int)
+    sit_pct = (sits / appts.replace(0, np.nan)).fillna(0.0)
+
+    out = pd.DataFrame({
+        "Harvester": appts.index.astype(str),
+        "Appointments": appts.values,
+        "Sits": sits.values,
+        "Sit %": _format_pct(sit_pct),
+    }).sort_values("Harvester", kind="stable").reset_index(drop=True)
+    return out
+
+
+def _harvester_pay_formula(sits: int) -> float:
     """
-    Returns (sales_rep_table, harvester_table).
-    - NET excludes rows whose Status is in net_exclude_statuses from appointments, sits, and sales.
-    - Harvester sits always count if Status in sit_harvester_statuses (even if excluded for NET).
+    0–8 sits: $100 per sit, $500 bonus at 8.
+    9–14 sits: $125 per sit from the beginning (retroactive) + $500 bonus.
+    15+ sits: $150 per sit from the beginning (retroactive) + $500 bonus.
     """
-    # Standardize Status values for matching
-    status_lc = df[col_status].astype(str).str.strip().str.lower()
-
-    sale_set = {s.strip().lower() for s in sale_statuses}
-    sit_sales_set = {s.strip().lower() for s in sit_sales_statuses}
-    sit_harv_set = {s.strip().lower() for s in sit_harvester_statuses}
-    net_excl_set = {s.strip().lower() for s in net_exclude_statuses}
-
-    # Flags
-    df["_is_sale"] = status_lc.isin(sale_set)
-    df["_is_sit_sales"] = status_lc.isin(sit_sales_set)
-    df["_is_sit_harv"] = status_lc.isin(sit_harv_set)
-    df["_is_net_excl"] = status_lc.isin(net_excl_set)
-
-    # Money
-    df["_insul_amt"] = coerce_money(df[col_insul]) if col_insul in df else 0.0
-    df["_rad_amt"] = coerce_money(df[col_radiant]) if col_radiant in df else 0.0
-
-    # IRBAD "count into the sales" (count once if either sold)
-    df["_irbad_flag"] = ((df["_insul_amt"] > 0) | (df["_rad_amt"] > 0)) & df["_is_sale"]
-
-    # Group per Sales Rep
-    groups = df.groupby(col_sales_rep, dropna=False)
-
-    rows = []
-    for rep, g in groups:
-        rep = rep if pd.notna(rep) and str(rep).strip() != "" else "(Unassigned)"
-
-        appointments = len(g)
-        sits = int(g["_is_sit_sales"].sum())
-        sales = int(g["_is_sale"].sum())
-
-        # Exclusions for NET
-        excl_appointments = int(g["_is_net_excl"].sum())
-        excl_sits = int((g["_is_net_excl"] & g["_is_sit_sales"]).sum())
-        excl_sales = int((g["_is_net_excl"] & g["_is_sale"]).sum())
-
-        net_appts = max(appointments - excl_appointments, 0)
-        net_sits = max(sits - excl_sits, 0)
-        net_sales = max(sales - excl_sales, 0)
-
-        sit_pct = (sits / appointments * 100.0) if appointments else 0.0
-        net_sit_pct = (net_sits / net_appts * 100.0) if net_appts else 0.0
-        sales_pct = (sales / sits * 100.0) if sits else 0.0
-        net_sales_pct = (net_sales / net_sits * 100.0) if net_sits else 0.0
-
-        insul_sum = float(g["_insul_amt"].sum())
-        rad_sum = float(g["_rad_amt"].sum())
-        irbad_sales_count = int(g["_irbad_flag"].sum())
-        irbad_pct = (irbad_sales_count / sales * 100.0) if sales else 0.0
-
-        rows.append(
-            {
-                "Sales Rep": rep,
-                "Appointments": appointments,
-                "Sits": sits,
-                "Sit %": sit_pct,
-                "Net Sits": net_sits,
-                "Net Sit %": net_sit_pct,
-                "Sales": sales,
-                "Sales %": sales_pct,
-                "Net Sales": net_sales,
-                "Net Sales %": net_sales_pct,
-                "Insulation $": insul_sum,
-                "Radiant Barrier $": rad_sum,
-                "IRBAD %": irbad_pct,
-            }
-        )
-
-    sales_rep_table = pd.DataFrame(rows).sort_values(["Sales Rep"]).reset_index(drop=True)
-
-    # Harvester report
-    harv_df = df.copy()
-    harv_df[col_appt_by] = harv_df[col_appt_by].fillna("").astype(str).str.strip()
-    harv_df.loc[harv_df[col_appt_by] == "", col_appt_by] = "Company"
-
-    h_groups = harv_df.groupby(col_appt_by, dropna=False)
-    h_rows = []
-    for harv, g in h_groups:
-        appts = len(g)
-        sits_h = int(g["_is_sit_harv"].sum())
-        sit_pct_h = (sits_h / appts * 100.0) if appts else 0.0
-        h_rows.append({"Harvester": harv, "Appointments": appts, "Sits": sits_h, "Sit %": sit_pct_h})
-    harv_table = pd.DataFrame(h_rows).sort_values(["Harvester"]).reset_index(drop=True)
-
-    return sales_rep_table, harv_table
+    if sits <= 0:
+        return 0.0
+    if sits < 8:
+        return sits * 100.0
+    if 8 <= sits < 9:
+        return sits * 100.0 + 500.0
+    if 9 <= sits < 15:
+        return sits * 125.0 + 500.0
+    # 15 or more
+    return sits * 150.0 + 500.0
 
 
-# ---------------------------
-# Optional: Excel export
-# ---------------------------
-
-def to_excel_bytes(tables: Dict[str, pd.DataFrame]) -> bytes:
-    """Return an .xlsx workbook (in-memory) with each table on its own sheet."""
-    bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
-        for sheet_name, df in tables.items():
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-            # Very basic % formatting for known % columns
-            workbook = writer.book
-            pct_fmt = workbook.add_format({"num_format": "0%"})
-            if not df.empty:
-                for j, col in enumerate(df.columns):
-                    if "%" in col:
-                        # Apply to entire column (skip header)
-                        writer.sheets[sheet_name].set_column(j, j, None, pct_fmt)
-    return bio.getvalue()
+def build_harvester_pay_table(harvester_tbl: pd.DataFrame) -> pd.DataFrame:
+    t = harvester_tbl.copy()
+    t["Pay ($)"] = t["Sits"].apply(_harvester_pay_formula)
+    return t[["Harvester", "Sits", "Pay ($)"]]

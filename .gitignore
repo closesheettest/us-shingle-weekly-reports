@@ -1,5 +1,20 @@
-.venv/
+# Python
 __pycache__/
 *.pyc
+
+# venvs
+.venv/
+venv/
+
+# Editors
+.vscode/
+.idea/
+
+# OS
 .DS_Store
+
+# Streamlit cache
 .streamlit/
+
+# Notebooks/outputs
+*.ipynb_checkpoints/
